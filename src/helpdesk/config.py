@@ -43,7 +43,9 @@ DEFAULTS: Dict[str, Any] = {
         "language": "de",
         "beam_size": 1,
         "download_root": "/models/whisper",
-        "initial_prompt": "",
+        # Biases recognition towards your vocabulary. Worth filling in: it is the
+        # difference between "Drucker druckt nicht" and "Drucker trug nicht".
+        "initial_prompt": "Drucker, Papierstau, Fehlercode, Toner, VPN, Kennung, Passwort, Rechner, Bildschirm, Netzwerk.",
         "min_avg_logprob": -1.1,
         "max_no_speech_prob": 0.75,
         "cpu_threads": 4,
@@ -151,7 +153,9 @@ DEFAULTS: Dict[str, Any] = {
     },
     "vad": {
         "backend": "auto",
-        "aggressiveness": 2,
+        # 3 (strictest) on a telephony line: at 2, steady line noise kept the
+        # utterance open for seconds after the caller stopped.
+        "aggressiveness": 3,
         "end_silence_ms": 420,
         "speculative_silence_ms": 220,
         "start_frames": 3,
@@ -186,6 +190,9 @@ DEFAULTS: Dict[str, Any] = {
         "silence_hangup_after_ms": 20000,
         "max_call_seconds": 900,
         "max_misunderstood": 2,
+        # "Vielen Dank" means goodbye, not "transfer me". Handled in code because
+        # the model kept reading it as a request it could not fulfil.
+        "farewell_ends_call": True,
         "answer_delay_ms": 0,
         "ring_before_answer": True,
     },

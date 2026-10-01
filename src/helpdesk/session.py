@@ -36,7 +36,7 @@ from .metrics import CallMetrics, TurnMetrics
 from .sip.ua import Call, SipUserAgent, TransferError, TransferMethod
 from .tts.base import Synthesizer
 from .tts.registry import PhraseCache
-from .tts.text import SentenceStreamer, is_backchannel
+from .tts.text import SentenceStreamer, is_backchannel, is_farewell
 
 log = logging.getLogger(__name__)
 
@@ -133,6 +133,7 @@ class CallSession:
             echo_correlation=float(vad_config.get("echo_correlation", 0.72)),
         )
         self.resume_on_backchannel = bool(vad_config.get("resume_on_backchannel", True))
+        self.farewell_ends_call = bool(dialog.get("farewell_ends_call", True))
 
         tts_config = config["tts"]
         self._streamer_kwargs = dict(
@@ -633,6 +634,14 @@ class CallSession:
             await self._wait_for_playout()
             return
         self._interrupted_remainder = ""
+
+        if self.farewell_ends_call and is_farewell(transcript.text):
+            # Saying goodbye is not a request the agent cannot handle, so it must
+            # not become a transfer. Decided here rather than by the model.
+            log.info("farewell %r: saying goodbye", transcript.text)
+            self.metrics.add(metrics)
+            await self._do_hangup("assistant-goodbye")
+            return
 
         if self.texts.thinking and metrics.utterance_ms > 2500:
             # Only for long questions, where retrieval and generation will take

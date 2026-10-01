@@ -233,3 +233,33 @@ def is_backchannel(text: str) -> bool:
     if len(words) > 3:
         return False
     return all(word in BACKCHANNEL_WORDS for word in words)
+
+
+#: Closings that mean the caller is done. Kept deliberately tight: anything with
+#: a follow-up ("danke, aber ...") must not match, because hanging up on someone
+#: mid-question is far worse than one unnecessary model call.
+FAREWELL_PHRASES = {
+    "danke", "danke schoen", "danke schön", "vielen dank", "besten dank",
+    "dankeschoen", "dankeschön", "danke sehr", "vielen dank dann",
+    "tschuess", "tschüss", "tschau", "ciao", "wiederhoeren", "wiederhören",
+    "auf wiederhoeren", "auf wiedersehen", "auf wiederhören",
+    "das war alles", "das waers", "das wärs", "das war es", "mehr nicht",
+    "nichts weiter", "sonst nichts", "alles gut danke", "ok danke",
+    "okay danke", "gut danke", "passt danke", "perfekt danke", "super danke",
+    "alles klar danke", "danke tschuess", "danke tschüss",
+    "danke das war alles", "vielen dank das war alles",
+    "vielen dank auf wiederhoeren", "vielen dank auf wiederhören",
+    "danke und tschuess", "danke und tschüss",
+}
+
+
+def is_farewell(text: str) -> bool:
+    """True when the utterance is purely a closing, with nothing else in it."""
+    cleaned = re.sub(r"[^\w\säöüß]", " ", text.lower(), flags=re.UNICODE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned or "?" in text:
+        return False
+    # A question or a follow-up disqualifies it outright.
+    if any(word in cleaned.split() for word in ("aber", "noch", "frage", "wie", "was", "wann", "wo", "warum")):
+        return False
+    return cleaned in FAREWELL_PHRASES

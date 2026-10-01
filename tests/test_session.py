@@ -429,6 +429,27 @@ async def test_dtmf_zero_transfers():
     return True
 
 
+async def test_farewell_ends_the_call():
+    """Saying goodbye must hang up politely, never transfer."""
+    session, call, ua, synth, llm = await build_session(
+        ["Vielen Dank."], ["sollte nicht aufgerufen werden [WEITERLEITEN]"]
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    requests_before = len(llm.requests)
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: ua.hangups or ua.transfers, 5, "call ended")
+
+    assert ua.transfers == [], f"a farewell was transferred: {ua.transfers}"
+    assert ua.hangups == ["assistant-goodbye"], ua.hangups
+    assert len(llm.requests) == requests_before, "the model was asked about a goodbye"
+    assert any("Wiederhören" in s for s in synth.spoken), synth.spoken
+    print("PASS farewell hangs up with a goodbye, without transferring or asking the model")
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
 async def test_backchannel_resumes_instead_of_restarting():
     """A caller saying "mhm" must not restart the answer."""
     session, call, ua, synth, llm = await build_session(
@@ -581,6 +602,7 @@ async def main() -> int:
         ("real interruption asks again", test_real_interruption_does_ask_again),
         ("echo does not interrupt", test_echo_does_not_interrupt),
         ("transfer method passthrough", test_transfer_method_passed_through),
+        ("farewell ends call", test_farewell_ends_the_call),
     ]
     failed = 0
     for name, test in tests:

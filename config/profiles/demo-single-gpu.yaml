@@ -59,8 +59,10 @@ asr:
   language: de                     # pin it; autodetect costs time and can flip
   beam_size: 1                     # greedy: beam search doubles latency
   download_root: /models/whisper
-  # Bias the recogniser towards your vocabulary -- product names, error codes:
-  initial_prompt: ""
+  # Bias the recogniser towards your vocabulary -- product names, error codes.
+  # Worth filling in with your own terms: this is the difference between
+  # "Drucker druckt nicht" and "Drucker trug nicht".
+  initial_prompt: "Drucker, Papierstau, Fehlercode, Toner, VPN, Kennung, Passwort, Rechner, Bildschirm, Netzwerk."
   min_avg_logprob: -1.1            # below this the transcript is discarded
   max_no_speech_prob: 0.75
   cpu_threads: 4
@@ -183,7 +185,9 @@ knowledge:
 
 vad:
   backend: auto                     # auto -> webrtc, then silero, then energy
-  aggressiveness: 2                 # webrtcvad 0-3; 3 is strictest
+  # 3 on a phone line: at 2, steady line noise kept an utterance open for
+  # seconds after the caller had finished.
+  aggressiveness: 3                 # webrtcvad 0-3; 3 is strictest
   end_silence_ms: 420               # THE latency dial: lower feels snappier but
                                     # starts cutting people off mid-sentence
   speculative_silence_ms: 220       # start recognising here, before the hangover
@@ -243,6 +247,7 @@ dialog:
   silence_hangup_after_ms: 20000    # then give up
   max_call_seconds: 900
   max_misunderstood: 2              # failed recognitions before handing off
+  farewell_ends_call: true          # "Vielen Dank" ends the call, never transfers
   answer_delay_ms: 0                # >0 to let it ring first, more human
   ring_before_answer: true
 
