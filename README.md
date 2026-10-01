@@ -28,27 +28,27 @@ Antwort von vorn zu beginnen — er merkt sich, was der Anrufer noch nicht gehö
 hat. Beides ist getestet.
 
 **Latenz: ja, das geht.** Die Pause zwischen „Anrufer hört auf zu reden" und
-„Agent fängt an zu reden" liegt bei **etwa 800 ms bis 1,0 s** mit der guten
-Stimme, und bei **600–750 ms**, wenn du auf Piper umstellst. Beides ist am
-Telefon unauffällig. Erreicht wird das mit drei Tricks: die Erkennung startet
+„Agent fängt an zu reden" liegt mit Piper bei **600–750 ms** und mit der
+natürlichen Stimme bei etwa **1,0 s**. Beides ist am Telefon unauffällig. Erreicht wird das mit drei Tricks: die Erkennung startet
 **vor** Ende der Sprechpause, die Antwort wird satzweise synthetisiert während das
 Modell noch generiert, und feste Sätze wie die Begrüßung sind vorgerendert. Wo die
 Zeit hingeht, steht pro Antwort im Log — du musst nicht raten.
 
-**Stimme: Qwen3-TTS ist der Standard.** Apache-2.0 (also kommerziell nutzbar),
-Deutsch, Stimmklonen aus wenigen Sekunden Material. Das ist derzeit das beste,
-was lokal für Deutsch zu haben ist.
+**Stimme: in zwei Stufen.** Standard ist Piper — nicht weil es am besten klingt,
+sondern weil es garantiert baut und läuft. Damit bringst du den Anruf erst
+komplett zum Laufen; die gute Stimme ist danach ein Konfigurationsschritt.
 
-| Stimme | Zeit bis erstes Audio | VRAM | Klingt |
-|---|---|---|---|
-| **Qwen3-TTS 1.7B** (Standard) | ~150–400 ms | ~8 GB | nah an einem Menschen, klonbar |
-| Qwen3-TTS 0.6B | ~100–250 ms | ~4 GB | gut, etwas weniger Prosodie |
-| Chatterbox | ~300–500 ms | ~3 GB | ähnlich gut, MIT, 23 Sprachen |
-| Piper | ~30–60 ms | 0 (CPU) | hörbar synthetisch — Fallback zur Fehlersuche |
+| Stimme | Erstes Audio | VRAM | Klingt | Aufwand |
+|---|---|---|---|---|
+| **Piper** (Standard) | ~30–60 ms | 0 (CPU) | verständlich, hörbar synthetisch | im Image enthalten |
+| Chatterbox | ~300–500 ms | ~3 GB | natürlich, klonbar, MIT | Image mit `TTS_PROFILE=quality` |
+| Qwen3-TTS | ~150–400 ms | ~4–8 GB | am besten, Apache-2.0 | eigener Container, siehe unten |
 
-Der Preis für die Qualität ist Latenz: ~800 ms bis 1,0 s statt ~600 ms mit Piper.
-Für ein Telefongespräch ist beides im Rahmen; eine Sekunde Pause ist weniger als
-die meisten Menschen am Telefon brauchen.
+Warum Qwen3-TTS nicht im Image ist, obwohl es das beste wäre: sein PyPI-Paket
+verlangt **Python ≥ 3.13**, die CUDA-Basis-Images liefern 3.10. Und Chatterbox
+pinnt `torch==2.6.0` exakt, verträgt sich also nicht mit einem selbst gewählten
+torch. Beides sind reale Abhängigkeitskonflikte, keine Vermutungen — deshalb ist
+der Standardpfad bewusst der, der ohne Überraschungen durchläuft.
 
 Was zur Menschlichkeit genauso viel beiträgt wie die Stimme — und alles eingebaut
 ist: dass man ihn **jederzeit unterbrechen** kann, dass sein eigenes Echo das
@@ -68,8 +68,8 @@ Gemessen ab dem Moment, in dem der Anrufer aufhört zu sprechen:
 | Spracherkennung | 0–100 ms | läuft spekulativ schon vorher an |
 | Wissenssuche | ~15 ms | numpy-Skalarprodukt, keine Datenbank |
 | LLM bis erstes Token | 120–200 ms | 7B Q4 auf einer L4 |
-| TTS bis erstes Audio | 150–400 ms | Qwen3-TTS 1.7B; Piper 30–60 ms |
-| **Summe** | **~800 ms – 1,0 s** | mit Piper statt Qwen3 ~600–750 ms |
+| TTS bis erstes Audio | 30–60 ms | Piper; Chatterbox 300–500 ms |
+| **Summe** | **~600–750 ms** | mit Chatterbox ~900 ms – 1,1 s |
 
 Die eine Stellschraube, die wirklich zählt, ist `vad.end_silence_ms`. Runter auf
 300 ms fühlt sich spürbar flotter an, aber der Agent fängt an, Leute zu
@@ -84,32 +84,33 @@ Das `*` heißt: die spekulative Erkennung hat gegriffen, die ASR-Zeit war gratis
 
 ---
 
-## VRAM: drei fertige Profile
+## VRAM: fertige Profile
 
 In `config/profiles/` liegen drei vollständige Konfigurationen. Eine davon über
 `config/config.yaml` kopieren:
 
-| Profil | VRAM | Stimme | LLM | Wofür |
-|---|---|---|---|---|
-| `12gb-shared.yaml` | ~11 GB | Qwen3-TTS 0.6B | 7B | GPU wird geteilt, ~12 GB frei |
-| **`demo-single-gpu.yaml`** | **~15 GB** | **Qwen3-TTS 1.7B** | **7B** | **eine eigene L4, Demo-/Testbetrieb** |
-| `16gb-quality.yaml` | ~15 GB | Qwen3-TTS 1.7B | 7B | wie oben, Embeddings über Ollama |
-| `22gb-max.yaml` | ~20 GB | Qwen3-TTS 1.7B | 14B | L4 komplett frei |
+| Profil | VRAM | Stimme | Wofür |
+|---|---|---|---|
+| **`demo-single-gpu.yaml`** | **~7 GB** | **Piper** | **hier anfangen** — läuft im Standard-Image |
+| `12gb-shared.yaml` | ~7 GB | Piper | GPU wird mit anderem geteilt |
+| `quality-chatterbox.yaml` | ~10 GB | Chatterbox | natürliche Stimme, Image mit `TTS_PROFILE=quality` |
 
 ```bash
 cp config/profiles/demo-single-gpu.yaml config/config.yaml
 ```
 
+`config/config.yaml` is yours and is gitignored, so `git pull` never touches your
+settings. The profiles and `config.example.yaml` are the tracked copies.
+
 `demo-single-gpu.yaml` ist der Startpunkt für „eine freie L4": gute Stimme,
 kleines Sprachmodell, Embeddings auf der CPU — also kein zweites Ollama-Modell
 zum Herunterladen.
 
-**Warum ich bei 16 GB das 7B-Modell behalte, obwohl Platz für 14B wäre:** Am
-Telefon hört der Anrufer die Stimme, nicht die Modellgröße. Die Antworten sind
-kurz und stehen ohnehin in der Wissensdatenbank — ein 14B formuliert sie selten
-besser, braucht aber 150–250 ms länger, und das bei *jeder* Antwort. Das VRAM ist
-in der 1.7B-Stimme deutlich besser angelegt. Wenn du das Gegenteil hören willst:
-`22gb-max.yaml` nehmen und vergleichen, das ist der ganze Aufwand.
+Alle Profile nutzen ein 7B-Sprachmodell. Am Telefon hört der Anrufer die Stimme,
+nicht die Modellgröße: die Antworten sind kurz und stehen in der
+Wissensdatenbank, ein 14B formuliert sie selten besser, kostet aber 150–250 ms
+bei *jeder* Antwort. Wenn du es vergleichen willst, ist es eine Zeile:
+`llm.model: "qwen3:14b"` plus `think: false`.
 
 Wichtig: `keep_alive: "-1"` lässt das Sprachmodell dauerhaft im VRAM. Ohne das
 lädt Ollama es nach ein paar Minuten Ruhe aus — und der nächste Anrufer wartet
@@ -127,27 +128,47 @@ die ehrliche Zahl: zwei parallele Anrufe würden sich die GPU teilen und wären
 beide langsam. Weitere Anrufe werden mit `486 Busy Here` abgewiesen, die PBX
 kann sie dann auf die Weiterleitungsnummer schicken.
 
-### Eigene Stimme verwenden
+### Bessere Stimme — der zweite Schritt
 
-Qwen3-TTS klont aus wenigen Sekunden Material. Aufnahme (ruhig, ohne Störgeräusche)
-ablegen und den gesprochenen Text exakt eintragen:
+**Stufe 1: Chatterbox** (natürlich, klonbar, MIT-Lizenz). Image neu bauen und
+umstellen:
+
+```bash
+TTS_PROFILE=quality docker compose build     # ~15 Min, zieht torch
+cp config/profiles/quality-chatterbox.yaml config/config.yaml
+docker compose up -d
+docker compose exec helpdesk python3 /app/scripts/try_pipeline.py "Test"
+```
+
+Eigene Stimme klonen — 10–20 Sekunden klare Aufnahme nach `./voices/` legen:
 
 ```yaml
 tts:
-  qwen3:
-    mode: clone
+  backend: chatterbox
+  chatterbox:
     reference_audio: /models/piper/meine-stimme.wav
-    reference_text: "Guten Tag, Sie sprechen mit dem Service der Beispiel GmbH."
 ```
 
-Die eingebauten Stimmen listet `scripts/list_qwen_voices.py` auf; der Name gehört
-dann nach `tts.qwen3.speaker`. Alternativ `mode: design` und die Stimme in Worten
-beschreiben (`instruct: "ruhig, freundlich, sachlich"`).
+**Stufe 2: Qwen3-TTS** (bestes Deutsch, Apache-2.0, Klonen aus 3 Sekunden). Es
+kann nicht ins Image, weil sein PyPI-Paket Python 3.13 braucht. Der saubere Weg
+ist ein eigener Container, der es als OpenAI-kompatiblen TTS-Dienst anbietet —
+das Backend dafür ist schon eingebaut:
+
+```yaml
+tts:
+  backend: openai
+  openai:
+    base_url: "http://127.0.0.1:8880/v1"
+    response_format: pcm        # Pflicht: alles andere kostet Latenz
+    sample_rate: 24000
+```
+
+Damit ist auch jeder andere TTS-Server nutzbar (Kokoro, XTTS, LocalAI). Den
+Qwen3-Dienst selbst liefert dieses Repo noch nicht mit — sag Bescheid, wenn du
+ihn brauchst.
 
 Rechtlich, weil es praktisch relevant ist: eine fremde Stimme zu klonen braucht
 deren Einverständnis.
-
----
 
 ## Installation
 
@@ -198,6 +219,22 @@ nvidia-smi --id=4           # nach dem ersten Anruf muss hier Ollama auftauchen
 
 `./scripts/preflight.sh` prüft beides und meckert, wenn nur eine Seite gepinnt ist.
 
+**Docker 29 und CDI:** Neuere Docker-Versionen wählen GPUs über CDI aus. Falls
+`--gpus device=4` nicht geht, `--device nvidia.com/gpu=4` aber schon (preflight
+sagt dir das), dann mit dem Overlay starten:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cdi.yml up -d --build
+```
+
+Fehlt die CDI-Spec ganz, hilft:
+
+```bash
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
 ### 2. Profil wählen und Modelle holen
 
 ```bash
@@ -206,8 +243,9 @@ cp config/profiles/16gb-quality.yaml config/config.yaml
 ./scripts/download_models.sh     # Ollama-Modelle + Piper als Fallback-Stimme
 ```
 
-Qwen3-TTS lädt beim ersten Start selbst von Hugging Face (~5 GB, landet im
-`/models`-Volume, also einmalig).
+`download_models.sh` holt die deutsche Piper-Stimme nach `./voices/` — ohne die
+startet der Container nicht. Whisper lädt beim ersten Start selbst (~1,6 GB, ins
+`/models`-Volume, also einmalig). Das Preflight prüft die Stimme mit.
 
 ### 3. Zugangsdaten
 
@@ -236,12 +274,11 @@ docker compose logs -f
 Erwartete Ausgabe:
 
 ```
-loading ASR model large-v3-turbo (cuda, float16)
+loading ASR model large-v3-turbo (cuda, int8_float16)
 ASR model ready in 4.2s
-loading Qwen3-TTS Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice (cuda:0, bfloat16)
-Qwen3-TTS ready in 21.7s
+loading Piper voice /models/piper/de_DE-thorsten-high.onnx (cuda=False)
 knowledge base built: 14 chunks from /app/knowledge in 2.1s
-warmup complete in 41.6s
+warmup complete in 12.4s
 registered as 900, refreshing in 225s
 helpdesk ready: extension 900 on 192.168.1.10, transfers go to 200
 ```
@@ -257,7 +294,6 @@ Stimme zu beurteilen, bevor jemand anruft:
 
 ```bash
 docker compose exec helpdesk python3 /app/scripts/try_pipeline.py "Mein Drucker zeigt E-512"
-docker compose exec helpdesk python3 /app/scripts/list_qwen_voices.py
 ```
 
 Zeigt die Antwort, die Zeiten jeder Stufe, welche Wissensquellen getroffen
@@ -375,7 +411,7 @@ Was man am ehesten anfasst:
 | `vad.barge_in_ms` | wie leicht man den Agenten unterbrechen kann |
 | `vad.echo_attenuation_db` | runter, wenn Echo den Agenten unterbricht |
 | `dialog.transfer_method` | `auto`, `refer` oder `dtmf` (siehe oben) |
-| `tts.qwen3.model_id` | 1.7B (besser) oder 0.6B (sparsamer) |
+| `tts.backend` | `piper` (schnell) oder `chatterbox` (natürlich) |
 | `dialog.greeting` | Begrüßung (wird vorgerendert) |
 | `dialog.transfer_number` | wohin unbeantwortbare Anrufe gehen |
 | `dialog.max_sentences` | Antwortlänge; 2–3 ist telefontauglich |
@@ -450,20 +486,16 @@ den Standard; DTMF-Senden nach RFC 2833 (Paketstruktur und Rückdekodierung);
 Fehlerfall, Stille-Überwachung und DTMF-Null.
 
 **Noch nicht verifiziert**, weil mir dafür die Hardware fehlt: der Lauf gegen
-eine echte PBX, die tatsächliche Latenz auf deiner L4, und wie Qwen3-TTS auf
+eine echte PBX, die tatsächliche Latenz auf deiner L4, und wie Chatterbox auf
 Deutsch klingt. Die Zahlen für die Modellstufen sind veröffentlichte Benchmarks
 für diese Hardwareklasse, keine Messung auf deinem Server.
 
-Eine Einschränkung, die ich benennen muss: **das Qwen3-TTS-Backend ist gegen die
-dokumentierte API geschrieben, nicht gegen eine laufende Installation.** Das
-Modell ist von Januar 2026 und ich konnte es hier nicht ausführen. Der Code geht
-defensiv mit Abweichungen um (er sucht die Streaming-Methode zur Laufzeit, kommt
-mit beiden `from_pretrained`-Signaturen zurecht und normalisiert verschiedene
-Rückgabeformen), und wenn etwas nicht passt, nennt die Fehlermeldung den
-Ausweg. Trotzdem: **beim ersten Start damit rechnen, dass `tts.qwen3.language`
-(`"German"` vs. `"de"`) oder der Speaker-Name angepasst werden muss.** Zum
-Prüfen reicht `scripts/try_pipeline.py` — ohne einen einzigen Anruf. Und
-`TTS_BACKEND=piper` funktioniert als Rückfallebene garantiert.
+Eine Einschränkung, die ich benennen muss: **die Backends für Chatterbox und
+Qwen3-TTS sind gegen die dokumentierte API geschrieben, nicht gegen eine laufende
+Installation.** Der Code geht defensiv mit Abweichungen um und nennt im Fehlerfall
+den Ausweg, aber beim ersten Umstellen kann Nacharbeit nötig sein. Prüfen lässt
+sich das mit `scripts/try_pipeline.py`, ohne einen einzigen Anruf. Piper ist
+dagegen vollständig im Image und der garantierte Pfad.
 
 Der erste echte Anruf ist der eigentliche Test — `sip.trace: true` dabei
 anlassen.
@@ -484,12 +516,12 @@ src/helpdesk/
   audio/        G.711-Codec, Resampling, Sprachaktivität und Endpunkterkennung
   asr/          faster-whisper mit Halluzinationsfilter
   llm/          Ollama- und OpenAI/vLLM-Streaming, der Dialogagent
-  tts/          Qwen3-TTS, Piper, Chatterbox, OpenAI-kompatibel, Satzaufteilung
+  tts/          Piper, Chatterbox, Qwen3-TTS, OpenAI-kompatibel, Satzaufteilung
   kb/           Markdown-Chunking, Embeddings, hybride Suche
   session.py    Gesprächsablauf: der Latenzpfad
   app.py        Verdrahtung und Start
 config/         Konfiguration, kommentiert, plus drei VRAM-Profile
 knowledge/      Wissensdatenbank (Markdown)
-scripts/        Modelldownload, Pipeline-Test, Tests, Healthcheck
+scripts/        Preflight, Modelldownload, Pipeline-Test, Tests, Healthcheck
 tests/          simulierte PBX, Session-, Verdrahtungs- und Unit-Tests
 ```

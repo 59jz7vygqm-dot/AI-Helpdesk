@@ -1,6 +1,10 @@
 # Secrets -- the SIP password belongs here, never in config.yaml
 .env
 
+# The live configuration is yours: copy a profile over it. Tracking this file
+# would make every pull collide with your local settings.
+config/config.yaml
+
 # Model weights and caches (several GB)
 voices/*.onnx
 voices/*.onnx.json

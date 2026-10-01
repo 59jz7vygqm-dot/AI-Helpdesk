@@ -3,11 +3,15 @@ services:
     build:
       context: .
       args:
-        # quality = Qwen3-TTS on the GPU (default). lite = Piper only, small image.
-        TTS_PROFILE: "${TTS_PROFILE:-quality}"
+        # lite = Piper only (default, builds in minutes).
+        # quality = adds Chatterbox on the GPU.
+        TTS_PROFILE: "${TTS_PROFILE:-lite}"
     image: ai-helpdesk:latest
     container_name: ai-helpdesk
-    restart: unless-stopped
+    # Not unless-stopped: a configuration error would otherwise restart forever,
+    # reloading models each time. Five attempts covers a transient failure and
+    # then leaves the container stopped with the error visible in the log.
+    restart: on-failure:5
 
     # Host networking is strongly recommended for SIP.  RTP negotiates ports in
     # the SDP body, which Docker's NAT does not rewrite, so bridged networking
@@ -32,9 +36,7 @@ services:
       # --- models ------------------------------------------------------
       HELPDESK_LLM_BASE_URL: "${OLLAMA_URL:-http://127.0.0.1:11434}"
       HELPDESK_LLM_MODEL: "${LLM_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
-      HELPDESK_TTS_BACKEND: "${TTS_BACKEND:-qwen3}"
-      HELPDESK_TTS_QWEN3_MODEL_ID: "${TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
-      HELPDESK_TTS_QWEN3_SPEAKER: "${TTS_SPEAKER:-}"
+      HELPDESK_TTS_BACKEND: "${TTS_BACKEND:-piper}"
 
       # How the agent hands calls over. auto = try SIP REFER, fall back to the
       # PBX feature code (needed when a managed PBX has allow_transfer=no).

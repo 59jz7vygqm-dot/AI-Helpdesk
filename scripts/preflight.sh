@@ -7,6 +7,37 @@ cd "$(dirname "$0")/.."
 PASS=0
 WARN=0
 FAIL=0
+# Not guaranteed to be exported (cron, some sudo configs), and set -u is on.
+ME="${USER:-$(id -un 2>/dev/null || echo "$(whoami)")}"
+
+# Logs go to unique paths: a leftover file from a run as another user would make
+# the redirection fail, which looked like the command itself failing.
+LOGDIR=$(mktemp -d 2>/dev/null || echo "/tmp")
+trap 'rm -rf "$LOGDIR" 2>/dev/null' EXIT
+
+# Read one key from a top-level section of a YAML file. Only keys indented by
+# exactly two spaces count, so a nested block cannot be mistaken for the section
+# itself, and two sections sharing a key name stay distinct.
+yaml_get() {
+  awk -v want_sec="$2" -v want_key="$3" '
+    /^[A-Za-z_][A-Za-z0-9_]*:/ {
+      sec = substr($0, 1, index($0, ":") - 1)
+      next
+    }
+    sec != want_sec { next }
+    /^  [A-Za-z_]/ {
+      line = substr($0, 3)
+      if (index(line, want_key ":") == 1) {
+        val = substr(line, length(want_key) + 2)
+        sub(/#.*/, "", val)
+        gsub(/^[ \t]+|[ \t]+$/, "", val)
+        gsub(/^"|"$/, "", val)
+        print val
+        exit
+      }
+    }
+  ' "$1"
+}
 
 ok()   { printf '  \033[32mOK\033[0m    %s\n' "$1"; PASS=$((PASS+1)); }
 warn() { printf '  \033[33mWARN\033[0m  %s\n' "$1"; WARN=$((WARN+1)); }
@@ -60,39 +91,89 @@ echo
 echo "=== 2. Docker ==="
 if command -v docker >/dev/null 2>&1; then
   ok "docker $(docker --version | sed 's/Docker version //;s/,.*//')"
+  # Decide once how docker can be reached; everything below uses $DOCKER.
+  DOCKER=""
+  if docker info >/dev/null 2>&1; then
+    DOCKER="docker"
+  elif sudo -n docker info >/dev/null 2>&1; then
+    DOCKER="sudo docker"
+    warn "docker needs sudo for this user"
+    hint "every compose command too: sudo docker compose up -d --build"
+    hint "or fix it once: sudo usermod -aG docker $ME  (then re-login)"
+  else
+    warn "cannot reach the docker daemon as $ME"
+    hint "fix it once: sudo usermod -aG docker $ME  (then re-login)"
+    hint "or re-run this script with sudo to finish the checks"
+  fi
   if docker compose version >/dev/null 2>&1; then
     ok "docker compose available"
   else
     bad "docker compose plugin missing"; hint "apt install docker-compose-plugin"
   fi
-  # The GPU must be visible inside a container, not just on the host.
-  if docker run --rm --gpus "device=$GPU_ID" nvidia/cuda:12.8.1-base-ubuntu22.04 \
-       nvidia-smi -L >/tmp/preflight-gpu.log 2>&1; then
-    ok "containers can use GPU $GPU_ID: $(head -1 /tmp/preflight-gpu.log)"
+  # The GPU must be visible inside a container, not just on the host. Docker 29
+  # routes --gpus through CDI, and which spelling works depends on how the host
+  # was set up, so try each and report the one that does.
+  # shellcheck disable=SC2034
+  GPU_SPEC=""
+  IMAGE=nvidia/cuda:12.8.1-base-ubuntu22.04
+  if [ -z "$DOCKER" ]; then
+    # Without daemon access the probe says nothing about the GPU; reporting a
+    # failure here would point at the wrong thing entirely.
+    warn "GPU-in-container check skipped: no docker access"
   else
-    bad "containers cannot use the GPU (NVIDIA Container Toolkit)"
-    hint "install nvidia-container-toolkit, then: systemctl restart docker"
-    hint "details: /tmp/preflight-gpu.log"
+    for spec in "--gpus device=$GPU_ID" "--device nvidia.com/gpu=$GPU_ID" "--gpus all"; do
+      # shellcheck disable=SC2086
+      if $DOCKER run --rm $spec "$IMAGE" nvidia-smi -L >"$LOGDIR/gpu.log" 2>&1; then
+        GPU_SPEC="$spec"
+        break
+      fi
+    done
   fi
+  case "${DOCKER:+$GPU_SPEC}" in
+    "")
+      if [ -n "$DOCKER" ]; then
+        bad "containers cannot use any GPU"
+        hint "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+        hint "sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
+        hint "details: $LOGDIR/gpu.log"
+      fi
+      ;;
+    "--gpus all")
+      warn "only '--gpus all' works, not per-device selection"
+      hint "the container would see every GPU; it uses NVIDIA_VISIBLE_DEVICES=$GPU_ID"
+      hint "regenerate the CDI spec to get per-device selection:"
+      hint "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+      ;;
+    "--device nvidia.com/gpu=$GPU_ID")
+      ok "containers can use GPU $GPU_ID via CDI: $(head -1 "$LOGDIR/gpu.log")"
+      warn "this host needs the CDI form in compose"
+      hint "start with: docker compose -f docker-compose.yml -f docker-compose.cdi.yml up -d --build"
+      ;;
+    *)
+      ok "containers can use GPU $GPU_ID: $(head -1 "$LOGDIR/gpu.log")"
+      ;;
+  esac
 else
   bad "docker not found"
 fi
 
 echo
 echo "=== 3. Language model ==="
-LLM_BACKEND=$(grep -m1 '^  backend:' config/config.yaml 2>/dev/null | awk '{print $2}')
+LLM_BACKEND=$(yaml_get config/config.yaml llm backend 2>/dev/null)
 LLM_BACKEND="${LLM_BACKEND:-ollama}"
+CONFIG_MODEL=$(yaml_get config/config.yaml llm model 2>/dev/null)
 if [ "$LLM_BACKEND" = "ollama" ]; then
   OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
-  if curl -sf --max-time 5 "$OLLAMA_URL/api/tags" -o /tmp/preflight-ollama.json; then
+  if curl -sf --max-time 5 "$OLLAMA_URL/api/tags" -o "$LOGDIR/ollama.json"; then
     ok "Ollama reachable at $OLLAMA_URL"
-    LLM_MODEL="${LLM_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
-    if grep -q "\"${LLM_MODEL}\"" /tmp/preflight-ollama.json; then
+    # .env wins over the file, because compose passes it as an override.
+    LLM_MODEL="${LLM_MODEL:-${CONFIG_MODEL:-qwen2.5:7b-instruct-q4_K_M}}"
+    if grep -q "\"${LLM_MODEL}\"" "$LOGDIR/ollama.json"; then
       ok "model present: $LLM_MODEL"
     else
       bad "model missing: $LLM_MODEL"
       hint "ollama pull $LLM_MODEL"
-      echo "        installed: $(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' /tmp/preflight-ollama.json | head -8 | tr '\n' ' ')"
+      echo "        installed: $(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' "$LOGDIR/ollama.json" | head -8 | tr '\n' ' ')"
     fi
     # On a multi-GPU host Ollama must be pinned to the same free card, or it
     # takes GPU 0 and fails there.
@@ -110,16 +191,29 @@ if [ "$LLM_BACKEND" = "ollama" ]; then
     fi
   else
     bad "cannot reach Ollama at $OLLAMA_URL"
-    hint "systemctl status ollama"
-    hint "with network_mode: host the container uses this same address"
+    if command -v ollama >/dev/null 2>&1; then
+      hint "ollama is installed but not answering: sudo systemctl status ollama"
+      hint "start it: sudo systemctl enable --now ollama"
+    else
+      hint "not installed: curl -fsSL https://ollama.com/install.sh | sh"
+    fi
+    listening=$(ss -lntp 2>/dev/null | grep -i ollama | awk '{print $4}' | tr '\n' ' ')
+    [ -n "$listening" ] && hint "something ollama-ish listens on: $listening (set OLLAMA_URL)"
+    hint "or point llm.backend=openai at an existing server (e.g. your vLLM)"
   fi
 else
-  BASE_URL=$(grep -m1 '^  base_url:' config/config.yaml | awk '{print $2}' | tr -d '"')
-  if curl -sf --max-time 5 "${BASE_URL}/models" -o /tmp/preflight-llm.json; then
+  BASE_URL=$(yaml_get config/config.yaml llm base_url)
+  if curl -sf --max-time 5 "${BASE_URL}/models" -o "$LOGDIR/llm.json"; then
     ok "inference server reachable at $BASE_URL"
-    echo "        serves: $(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' /tmp/preflight-llm.json | head -4 | tr '\n' ' ')"
+    served=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$LOGDIR/llm.json" | head -4 | tr '\n' ' ')
+    echo "        serves: $served"
+    if [ -n "$CONFIG_MODEL" ] && ! grep -q "\"$CONFIG_MODEL\"" "$LOGDIR/llm.json"; then
+      bad "llm.model is $CONFIG_MODEL, but the server serves: $served"
+      hint "set llm.model in config/config.yaml to one of those"
+    fi
   else
     bad "cannot reach the inference server at $BASE_URL"
+    hint "base_url must include /v1 for an OpenAI-compatible server"
   fi
 fi
 
@@ -139,11 +233,34 @@ else
   bad ".env is missing"; hint "cp .env.example .env && nano .env"
 fi
 if [ -f config/config.yaml ]; then
-  profile=$(grep -m1 'model_id:' config/config.yaml | sed 's/.*12Hz-//;s/-Custom.*//')
-  ok "config/config.yaml present (voice model: ${profile:-unknown})"
+  TTS_CONF=$(yaml_get config/config.yaml tts backend)
+  ok "config/config.yaml present (voice: ${TTS_BACKEND:-${TTS_CONF:-?}})"
+  case "${TTS_BACKEND:-$TTS_CONF}" in
+    piper)
+      # Piper needs the voice file on disk; ./voices is mounted to /models/piper.
+      if ls voices/*.onnx >/dev/null 2>&1; then
+        ok "Piper voice present: $(ls voices/*.onnx | head -1 | xargs basename)"
+        if ! ls voices/*.onnx.json >/dev/null 2>&1; then
+          bad "the matching .onnx.json is missing next to the voice"
+          hint "./scripts/download_models.sh"
+        fi
+      else
+        bad "no Piper voice in ./voices (the container needs it at /models/piper)"
+        hint "./scripts/download_models.sh"
+      fi
+      ;;
+    chatterbox)
+      warn "chatterbox needs an image built with TTS_PROFILE=quality"
+      hint "TTS_PROFILE=quality docker compose build"
+      ;;
+    qwen3)
+      warn "qwen3-tts is not in the image (its PyPI package needs Python 3.13)"
+      hint "see the README section 'Bessere Stimme', or use piper/chatterbox"
+      ;;
+  esac
 else
   bad "config/config.yaml is missing"
-  hint "cp config/profiles/16gb-quality.yaml config/config.yaml"
+  hint "cp config/profiles/demo-single-gpu.yaml config/config.yaml"
 fi
 
 echo
@@ -174,10 +291,10 @@ fi
 
 echo
 echo "=== 6. Offline test suite ==="
-if PYTHONPATH=src timeout 300 ./scripts/run_tests.sh >/tmp/preflight-tests.log 2>&1; then
-  ok "all offline tests pass ($(grep -c '  ok ' /tmp/preflight-tests.log) unit checks)"
+if PYTHONPATH=src timeout 300 ./scripts/run_tests.sh >"$LOGDIR/tests.log" 2>&1; then
+  ok "all offline tests pass ($(grep -c '  ok ' "$LOGDIR/tests.log") unit checks)"
 else
-  warn "offline tests did not pass -- see /tmp/preflight-tests.log"
+  warn "offline tests did not pass -- see $LOGDIR/tests.log"
   hint "needs python3 with numpy and scipy on the host; harmless to skip"
 fi
 
@@ -187,4 +304,10 @@ if [ "$FAIL" -gt 0 ]; then
   echo "Fix the problems above before starting."
   exit 1
 fi
-echo "Ready. Next:  docker compose up -d --build && docker compose logs -f"
+COMPOSE="${DOCKER:-docker} compose"
+if [ "$GPU_SPEC" = "--device nvidia.com/gpu=$GPU_ID" ]; then
+  COMPOSE="$COMPOSE -f docker-compose.yml -f docker-compose.cdi.yml"
+fi
+echo "Ready. Next:"
+echo "  $COMPOSE up -d --build"
+echo "  $COMPOSE logs -f"

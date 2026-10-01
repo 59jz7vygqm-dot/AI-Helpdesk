@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 import time
@@ -34,6 +35,11 @@ def setup_logging(level: str = "INFO") -> None:
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("faster_whisper").setLevel(logging.INFO)
+    # Model downloads emit one INFO line per HTTP request, which buries
+    # everything else on startup.
+    for noisy in ("httpx", "httpcore", "urllib3", "filelock",
+                  "huggingface_hub", "hf_transfer", "transformers"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 class HelpdeskApplication:
@@ -79,7 +85,7 @@ class HelpdeskApplication:
             self.llm = OllamaClient(
                 base_url=llm_config["base_url"],
                 model=llm_config["model"],
-                keep_alive=str(llm_config.get("keep_alive", "-1")),
+                keep_alive=llm_config.get("keep_alive", -1),
                 timeout=float(llm_config.get("timeout", 60)),
                 options=llm_config.get("options") or {},
                 think=llm_config.get("think", False),
@@ -109,6 +115,18 @@ class HelpdeskApplication:
         )
 
         self.synthesizer = build_synthesizer(config["tts"])
+        # Fail fast on a voice that cannot load: this is a pure config error and
+        # must not cost a multi-minute model download before it surfaces.
+        try:
+            await self.synthesizer.warmup()
+        except Exception as exc:
+            backend = config["tts"].get("backend")
+            raise SystemExit(
+                f"the TTS backend {backend!r} cannot be used: {exc}\n"
+                f"Set tts.backend to 'piper' in config/config.yaml (and "
+                f"HELPDESK_TTS_BACKEND / TTS_BACKEND in .env if set), or rebuild "
+                f"the image with TTS_PROFILE=quality for chatterbox."
+            ) from exc
         self.phrases = PhraseCache(
             self.synthesizer, target_rate=8000, cache_dir=config["tts"].get("cache_dir") or None
         )
@@ -131,7 +149,6 @@ class HelpdeskApplication:
         log.info("warming up ...")
         started = time.monotonic()
         await self.recognizer.warmup()
-        await self.synthesizer.warmup()
         llm_ms = await self.llm.warmup()
         log.info("LLM warm (%d ms for a short completion)", int(llm_ms * 1000))
         if self.kb is not None:
@@ -219,10 +236,30 @@ class HelpdeskApplication:
     def request_shutdown(self) -> None:
         self._shutdown.set()
 
+    async def aclose(self) -> None:
+        """Release what was opened, tolerating a half-finished startup."""
+        for closeable in (self.recognizer, self.synthesizer, self.llm):
+            if closeable is None:
+                continue
+            try:
+                await closeable.close()
+            except Exception:  # pragma: no cover
+                log.debug("error closing %s", type(closeable).__name__, exc_info=True)
+
 
 async def amain(config_path: Optional[str]) -> int:
     config = load_config(config_path)
     setup_logging((config.get("logging") or {}).get("level", "INFO"))
+
+    if config_path and not os.path.exists(config_path):
+        # Not fatal: the environment may carry everything needed. But say so,
+        # because running on defaults is rarely what someone intended.
+        log.warning(
+            "%s does not exist -- running on defaults plus environment overrides. "
+            "Copy a profile into place: cp config/profiles/demo-single-gpu.yaml %s",
+            config_path,
+            config_path,
+        )
 
     problems = validate(config)
     if problems:
@@ -239,6 +276,12 @@ async def amain(config_path: Optional[str]) -> int:
         except NotImplementedError:  # pragma: no cover - not on this platform
             pass
 
-    await app.prepare()
-    await app.run()
+    try:
+        await app.prepare()
+        await app.run()
+    except BaseException:
+        # Includes SystemExit from a config problem: release the HTTP session so
+        # the real error is not buried under "Unclosed client session".
+        await app.aclose()
+        raise
     return 0

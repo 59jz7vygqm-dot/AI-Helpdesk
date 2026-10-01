@@ -1,11 +1,12 @@
-# CUDA 12.8 with cuDNN 9: 12.8 is what the Qwen3-TTS torch wheels target, and
-# cuDNN 9 is what CTranslate2 >= 4.5 (faster-whisper) links against.
-ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+# CUDA 12.4 with cuDNN 9: cuDNN 9 is what CTranslate2 >= 4.5 (faster-whisper)
+# links against. Torch, when the quality profile installs it, brings its own CUDA
+# libraries as wheels, so this base only has to satisfy CTranslate2.
+ARG CUDA_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 FROM ${CUDA_IMAGE}
 
-# quality = Qwen3-TTS on the GPU (needs torch, adds ~5 GB to the image)
-# lite    = Piper only, CPU, much smaller image and faster build
-ARG TTS_PROFILE=quality
+# lite    = Piper only (CPU). Small image, builds in minutes, always works.
+# quality = adds Chatterbox on the GPU (~5 GB more image, pulls torch).
+ARG TTS_PROFILE=lite
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -24,14 +25,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt requirements-quality.txt /app/
+# Base dependencies in their own layer, so a failure further down does not
+# re-download them.
+COPY requirements.txt /app/requirements.txt
 RUN python3 -m pip install --upgrade pip setuptools wheel \
-    && python3 -m pip install -r /app/requirements.txt \
-    && if [ "$TTS_PROFILE" = "quality" ]; then \
-         python3 -m pip install torch torchaudio \
-           --index-url https://download.pytorch.org/whl/cu128 \
-         && python3 -m pip install -r /app/requirements-quality.txt ; \
-       fi
+    && python3 -m pip install -r /app/requirements.txt
+
+# The voice stack is a separate layer for the same reason: it is the big one.
+COPY requirements-quality.txt /app/requirements-quality.txt
+RUN if [ "$TTS_PROFILE" = "quality" ]; then \
+      python3 -m pip install -r /app/requirements-quality.txt ; \
+    else \
+      echo "TTS_PROFILE=$TTS_PROFILE -- skipping the GPU voice stack" ; \
+    fi
 
 COPY src /app/src
 COPY config /app/config
@@ -43,8 +49,6 @@ RUN chmod +x /app/scripts/*.sh /app/scripts/*.py || true
 # does not re-download several gigabytes.
 VOLUME ["/models"]
 
-# SIP signalling and the RTP range from config/config.yaml.  With
-# network_mode: host (recommended) these are informational only.
 EXPOSE 5060/udp
 EXPOSE 16000-16200/udp
 

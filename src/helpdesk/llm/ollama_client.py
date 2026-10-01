@@ -25,7 +25,7 @@ class OllamaClient:
         base_url: str = "http://127.0.0.1:11434",
         *,
         model: str = "qwen2.5:7b-instruct-q4_K_M",
-        keep_alive: str = "-1",
+        keep_alive=-1,
         timeout: float = 60.0,
         options: Optional[Dict] = None,
         think: Optional[bool] = False,
@@ -40,6 +40,29 @@ class OllamaClient:
         #: default; None leaves the model's own default alone.
         self.think = think
         self._session = None
+
+    @property
+    def _keep_alive_value(self):
+        """Ollama wants a number of seconds or a duration with a unit.
+
+        A bare "-1" as a string is parsed as a duration and rejected with
+        'missing unit in duration', so numeric values are sent as JSON numbers
+        (-1 meaning "keep loaded indefinitely") and only real durations such as
+        "30m" are passed through as strings.
+        """
+        value = self.keep_alive
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return value
+        text = str(value).strip()
+        try:
+            return int(text)
+        except ValueError:
+            try:
+                return float(text)
+            except ValueError:
+                return text
 
     async def _get_session(self):
         import aiohttp  # noqa: PLC0415
@@ -63,7 +86,7 @@ class OllamaClient:
             "model": model or self.model,
             "messages": messages,
             "stream": True,
-            "keep_alive": self.keep_alive,
+            "keep_alive": self._keep_alive_value,
             "options": {**self.options, **(options or {})},
         }
         if self.think is not None:
@@ -112,7 +135,7 @@ class OllamaClient:
         session = await self._get_session()
         async with session.post(
             f"{self.base_url}/api/embed",
-            json={"model": model, "input": texts, "keep_alive": self.keep_alive},
+            json={"model": model, "input": texts, "keep_alive": self._keep_alive_value},
         ) as response:
             if response.status == 404:
                 # Older Ollama builds only have the single-input endpoint.
@@ -130,7 +153,7 @@ class OllamaClient:
         session = await self._get_session()
         async with session.post(
             f"{self.base_url}/api/embeddings",
-            json={"model": model, "prompt": text, "keep_alive": self.keep_alive},
+            json={"model": model, "prompt": text, "keep_alive": self._keep_alive_value},
         ) as response:
             if response.status != 200:
                 body = await response.text()

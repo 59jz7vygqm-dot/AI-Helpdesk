@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fetch the German Piper voice and pull the Ollama models.
-# Run this on the host before the first start.
+# Run this on the host before the first start -- the container will not start
+# without the voice file, since Piper is the default backend.
 set -euo pipefail
 
 VOICES_DIR="${VOICES_DIR:-./voices}"
@@ -59,3 +60,4 @@ done
 
 echo
 echo "Done. Voice in $VOICES_DIR, models in Ollama."
+echo "Next: ./scripts/preflight.sh"

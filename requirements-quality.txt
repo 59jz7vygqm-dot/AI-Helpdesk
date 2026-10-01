@@ -1,23 +1,20 @@
-# The quality voice stack.  Installed on top of requirements.txt when the image
-# is built with TTS_PROFILE=quality (the default).
+# Optional: the GPU voice. Installed when the image is built with
+# TTS_PROFILE=quality.
 #
-# torch is installed from the CUDA 12.8 index in the Dockerfile, not here, so
-# that the wheel matches the base image.
+# Chatterbox pins torch exactly (torch==2.6.0 as of 0.1.7), so it must bring its
+# own torch instead of being layered on top of one we chose. That is why nothing
+# installs torch before this file -- letting pip resolve it keeps the pins
+# consistent, at the cost of not picking the CUDA build ourselves. Torch ships its
+# CUDA libraries as wheels, so it works on any recent driver.
+#
+# NOT included: qwen3-tts. The PyPI package requires Python >= 3.13 and the CUDA
+# base images ship 3.10/3.12. See README ("Bessere Stimme") for how to run it in
+# its own container and reach it over HTTP via the openai TTS backend.
 
-# Qwen3-TTS: Apache-2.0, German, voice cloning, the quality backend
-qwen3-tts>=0.1.0
+chatterbox-tts>=0.1.7
 
 # Reading reference audio for voice cloning
 soundfile>=0.12
 
-# Needed by the Qwen3-TTS and Chatterbox model loaders
-transformers>=4.46
-accelerate>=1.0
-huggingface-hub>=0.26
-
-# CPU embeddings, so the knowledge base costs no VRAM when the GPU is full
+# CPU embeddings, so the knowledge base costs no VRAM
 fastembed>=0.4
-
-# Alternative quality voice (MIT, 23 languages). Uncomment to have both
-# available and switch with tts.backend at runtime:
-# chatterbox-tts>=0.1.4

@@ -1,3 +1,19 @@
+# Profile: natural voice via Chatterbox.
+#
+# Needs an image built with TTS_PROFILE=quality (installs Chatterbox and torch,
+# roughly 5 GB more and ~15 minutes).
+#
+#   Ollama  qwen2.5:7b-instruct Q4    ~5.2 GB   on the HOST
+#   ASR     large-v3-turbo float16    ~2.0 GB
+#   TTS     Chatterbox                ~3.0 GB
+#   KB      fastembed (CPU)                0
+#   ------------------------------------------
+#                                    ~10.2 GB
+#
+# Expect ~300-500 ms to first audio instead of Piper's ~50 ms.
+#
+# Copy over config/config.yaml to use it.
+
 # AI Helpdesk configuration.
 #
 # Every scalar here can be overridden from the environment as
@@ -36,7 +52,7 @@ asr:
   model: large-v3-turbo            # ~1.6 GB at int8; distil-large-v3 is smaller
   device: cuda
   device_index: 0
-  compute_type: float16            # float16 for quality; int8_float16 halves VRAM
+  compute_type: float16            # VRAM is available here
   language: de                     # pin it; autodetect costs time and can flip
   beam_size: 1                     # greedy: beam search doubles latency
   download_root: /models/whisper
@@ -57,7 +73,8 @@ llm:
   # retrieved text, so a 14B rarely says anything better -- it just answers later.
   # Spend spare VRAM on the voice instead; that is what callers notice.
   model: "qwen2.5:7b-instruct-q4_K_M"
-  keep_alive: "-1"                 # keep the model resident; never pay a reload
+  keep_alive: -1                   # number of seconds; -1 = keep resident forever
+                                   # (a string needs a unit, e.g. "30m")
   timeout: 60
   # Reasoning models (qwen3, deepseek-r1) would think silently for seconds
   # before the first word. Dead air on a phone call -- keep this false.
@@ -70,13 +87,16 @@ llm:
     stop: ["\nANRUFER", "\nAnrufer:", "\nUser:"]
 
 tts:
-  # qwen3      - GPU, the quality option: Apache-2.0, German, voice cloning
-  #              0.6B ~4 GB VRAM / 1.7B ~8 GB. THE default.
-  # piper      - CPU, ~30 ms to first audio, robotic but never stalls. Fallback
-  #              and the thing to switch to when diagnosing latency.
-  # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages
-  # openai     - any server exposing /v1/audio/speech (Kokoro, XTTS, LocalAI)
-  backend: qwen3
+  # piper      - CPU, ~30 ms to first audio, robotic but understandable.
+  #              THE default: in every image, never stalls, no GPU.
+  # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages.
+  #              Needs an image built with TTS_PROFILE=quality.
+  # qwen3      - Qwen3-TTS. Best quality, but the PyPI package needs Python 3.13
+  #              while the CUDA base images ship 3.10, so it is NOT in the image.
+  #              Run it in its own container and use the openai backend instead;
+  #              see the README section "Bessere Stimme".
+  # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
+  backend: chatterbox
 
   qwen3:
     # 1.7B sounds clearly better than 0.6B; drop to 0.6B only if VRAM is tight.
@@ -138,11 +158,16 @@ knowledge:
   dense_weight: 0.72                # rest is BM25; lower it if exact terms matter
   min_score: 0.28                   # below this, the agent says it cannot help
   embeddings:
-    backend: ollama                 # or: fastembed (CPU, no VRAM)
-    model: bge-m3                   # multilingual, strong on German
+    backend: fastembed              # CPU: no VRAM, no extra Ollama model to pull
+    # fastembed only serves models it ships as ONNX, not arbitrary HF ids.
+    # German-capable choices:
+    #   jinaai/jina-embeddings-v2-base-de              768 dim, trained on German
+    #   sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2  384 dim, smallest
+    #   intfloat/multilingual-e5-large                 1024 dim, needs the prefixes below
+    model: jinaai/jina-embeddings-v2-base-de
     batch_size: 16
-    query_prefix: ""                # for e5 models use "query: "
-    document_prefix: ""             # for e5 models use "passage: "
+    query_prefix: ""                # only e5 models need "query: " / "passage: "
+    document_prefix: ""
     cache_dir: /models/fastembed
     threads: 4
 
