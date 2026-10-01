@@ -233,11 +233,34 @@ else
   bad ".env is missing"; hint "cp .env.example .env && nano .env"
 fi
 if [ -f config/config.yaml ]; then
-  profile=$(grep -m1 'model_id:' config/config.yaml | sed 's/.*12Hz-//;s/-Custom.*//')
-  ok "config/config.yaml present (voice model: ${profile:-unknown})"
+  TTS_CONF=$(yaml_get config/config.yaml tts backend)
+  ok "config/config.yaml present (voice: ${TTS_BACKEND:-${TTS_CONF:-?}})"
+  case "${TTS_BACKEND:-$TTS_CONF}" in
+    piper)
+      # Piper needs the voice file on disk; ./voices is mounted to /models/piper.
+      if ls voices/*.onnx >/dev/null 2>&1; then
+        ok "Piper voice present: $(ls voices/*.onnx | head -1 | xargs basename)"
+        if ! ls voices/*.onnx.json >/dev/null 2>&1; then
+          bad "the matching .onnx.json is missing next to the voice"
+          hint "./scripts/download_models.sh"
+        fi
+      else
+        bad "no Piper voice in ./voices (the container needs it at /models/piper)"
+        hint "./scripts/download_models.sh"
+      fi
+      ;;
+    chatterbox)
+      warn "chatterbox needs an image built with TTS_PROFILE=quality"
+      hint "TTS_PROFILE=quality docker compose build"
+      ;;
+    qwen3)
+      warn "qwen3-tts is not in the image (its PyPI package needs Python 3.13)"
+      hint "see the README section 'Bessere Stimme', or use piper/chatterbox"
+      ;;
+  esac
 else
   bad "config/config.yaml is missing"
-  hint "cp config/profiles/16gb-quality.yaml config/config.yaml"
+  hint "cp config/profiles/demo-single-gpu.yaml config/config.yaml"
 fi
 
 echo

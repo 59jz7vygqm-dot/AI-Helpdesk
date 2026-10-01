@@ -1,32 +1,21 @@
-# Profile: demo on one dedicated GPU (e.g. an otherwise idle L4).
+# Profile: demo on one dedicated GPU, Piper voice.
 #
-# Everything the agent needs runs on that one card, and nothing else does.
-# Written for a 23 GB L4 with ~15 GB in use, so there is room to grow.
+# The one that just works: everything in the standard (lite) image, no torch, no
+# model downloads beyond Whisper. Start here, confirm the phone call works end to
+# end, then move to a better voice.
 #
 #   Ollama  qwen2.5:7b-instruct Q4    ~5.2 GB   runs on the HOST, pin it!
-#   ASR     large-v3-turbo float16    ~2.0 GB   in the container
-#   TTS     Qwen3-TTS 1.7B bfloat16   ~8.0 GB   in the container
-#   KB      fastembed (CPU)               0
+#   ASR     large-v3-turbo int8       ~1.6 GB   in the container
+#   TTS     Piper                          0   CPU
+#   KB      fastembed (CPU)                0
 #   ------------------------------------------
-#                                    ~15.2 GB of 23 GB
+#                                     ~6.8 GB
 #
-# IMPORTANT on a multi-GPU host, both sides must be pinned to the same free card:
-#
+# On a multi-GPU host, pin BOTH sides to the same free card:
 #   container -> GPU_ID=4 in .env
-#   ollama    -> CUDA_VISIBLE_DEVICES=4 in its systemd unit, see the README
-#
-# Without that, Ollama grabs GPU 0 and fails if that card is full.
+#   ollama    -> CUDA_VISIBLE_DEVICES=4 in its systemd unit (see README)
 #
 # Copy over config/config.yaml to use it.
-
-# AI Helpdesk configuration.
-#
-# Every scalar here can be overridden from the environment as
-# HELPDESK_<SECTION>_<KEY>, nested keys included:
-#   HELPDESK_SIP_SERVER_HOST=10.0.0.1
-#   HELPDESK_VAD_END_SILENCE_MS=350
-#   HELPDESK_TTS_PIPER_MODEL_PATH=/models/piper/de_DE-thorsten-high.onnx
-# Keep the SIP password in the environment, not in this file.
 
 # AI Helpdesk configuration.
 #
@@ -66,7 +55,7 @@ asr:
   model: large-v3-turbo            # ~1.6 GB at int8; distil-large-v3 is smaller
   device: cuda
   device_index: 0
-  compute_type: float16            # float16 for quality; int8_float16 halves VRAM
+  compute_type: int8_float16       # float16 is marginally better, ~2x the VRAM
   language: de                     # pin it; autodetect costs time and can flip
   beam_size: 1                     # greedy: beam search doubles latency
   download_root: /models/whisper
@@ -100,13 +89,16 @@ llm:
     stop: ["\nANRUFER", "\nAnrufer:", "\nUser:"]
 
 tts:
-  # qwen3      - GPU, the quality option: Apache-2.0, German, voice cloning
-  #              0.6B ~4 GB VRAM / 1.7B ~8 GB. THE default.
-  # piper      - CPU, ~30 ms to first audio, robotic but never stalls. Fallback
-  #              and the thing to switch to when diagnosing latency.
-  # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages
-  # openai     - any server exposing /v1/audio/speech (Kokoro, XTTS, LocalAI)
-  backend: qwen3
+  # piper      - CPU, ~30 ms to first audio, robotic but understandable.
+  #              THE default: in every image, never stalls, no GPU.
+  # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages.
+  #              Needs an image built with TTS_PROFILE=quality.
+  # qwen3      - Qwen3-TTS. Best quality, but the PyPI package needs Python 3.13
+  #              while the CUDA base images ship 3.10, so it is NOT in the image.
+  #              Run it in its own container and use the openai backend instead;
+  #              see the README section "Bessere Stimme".
+  # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
+  backend: piper
 
   qwen3:
     # 1.7B sounds clearly better than 0.6B; drop to 0.6B only if VRAM is tight.

@@ -36,7 +36,7 @@ asr:
   model: large-v3-turbo            # ~1.6 GB at int8; distil-large-v3 is smaller
   device: cuda
   device_index: 0
-  compute_type: float16            # float16 for quality; int8_float16 halves VRAM
+  compute_type: int8_float16       # float16 is marginally better, ~2x the VRAM
   language: de                     # pin it; autodetect costs time and can flip
   beam_size: 1                     # greedy: beam search doubles latency
   download_root: /models/whisper
@@ -70,13 +70,16 @@ llm:
     stop: ["\nANRUFER", "\nAnrufer:", "\nUser:"]
 
 tts:
-  # qwen3      - GPU, the quality option: Apache-2.0, German, voice cloning
-  #              0.6B ~4 GB VRAM / 1.7B ~8 GB. THE default.
-  # piper      - CPU, ~30 ms to first audio, robotic but never stalls. Fallback
-  #              and the thing to switch to when diagnosing latency.
-  # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages
-  # openai     - any server exposing /v1/audio/speech (Kokoro, XTTS, LocalAI)
-  backend: qwen3
+  # piper      - CPU, ~30 ms to first audio, robotic but understandable.
+  #              THE default: in every image, never stalls, no GPU.
+  # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages.
+  #              Needs an image built with TTS_PROFILE=quality.
+  # qwen3      - Qwen3-TTS. Best quality, but the PyPI package needs Python 3.13
+  #              while the CUDA base images ship 3.10, so it is NOT in the image.
+  #              Run it in its own container and use the openai backend instead;
+  #              see the README section "Bessere Stimme".
+  # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
+  backend: piper
 
   qwen3:
     # 1.7B sounds clearly better than 0.6B; drop to 0.6B only if VRAM is tight.

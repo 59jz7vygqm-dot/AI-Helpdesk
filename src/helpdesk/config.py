@@ -39,7 +39,7 @@ DEFAULTS: Dict[str, Any] = {
         "model": "large-v3-turbo",
         "device": "cuda",
         "device_index": 0,
-        "compute_type": "float16",
+        "compute_type": "int8_float16",
         "language": "de",
         "beam_size": 1,
         "download_root": "/models/whisper",
@@ -69,7 +69,10 @@ DEFAULTS: Dict[str, Any] = {
         },
     },
     "tts": {
-        "backend": "qwen3",
+        # piper is the default because it always builds and never stalls.
+        # Switch to chatterbox (image built with TTS_PROFILE=quality) or qwen3
+        # (own container, see README) for a natural voice.
+        "backend": "piper",
         "qwen3": {
             "model_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
             "device": "cuda:0",
