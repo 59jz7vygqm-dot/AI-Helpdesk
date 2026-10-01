@@ -85,7 +85,7 @@ class HelpdeskApplication:
             self.llm = OllamaClient(
                 base_url=llm_config["base_url"],
                 model=llm_config["model"],
-                keep_alive=str(llm_config.get("keep_alive", "-1")),
+                keep_alive=llm_config.get("keep_alive", -1),
                 timeout=float(llm_config.get("timeout", 60)),
                 options=llm_config.get("options") or {},
                 think=llm_config.get("think", False),

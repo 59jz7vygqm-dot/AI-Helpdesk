@@ -76,7 +76,8 @@ llm:
   # retrieved text, so a 14B rarely says anything better -- it just answers later.
   # Spend spare VRAM on the voice instead; that is what callers notice.
   model: "qwen2.5:7b-instruct-q4_K_M"
-  keep_alive: "-1"                 # keep the model resident; never pay a reload
+  keep_alive: -1                   # number of seconds; -1 = keep resident forever
+                                   # (a string needs a unit, e.g. "30m")
   timeout: 60
   # Reasoning models (qwen3, deepseek-r1) would think silently for seconds
   # before the first word. Dead air on a phone call -- keep this false.

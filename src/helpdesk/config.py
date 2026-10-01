@@ -55,7 +55,9 @@ DEFAULTS: Dict[str, Any] = {
         "base_url": "http://127.0.0.1:11434",
         "api_key": "none",
         "model": "qwen2.5:7b-instruct-q4_K_M",
-        "keep_alive": "-1",
+        # -1 keeps the model resident forever. A string must carry a unit
+        # ("30m"); a bare "-1" is rejected by Ollama as a malformed duration.
+        "keep_alive": -1,
         "timeout": 60,
         # Reasoning models would spend seconds thinking before the first word.
         "think": False,
