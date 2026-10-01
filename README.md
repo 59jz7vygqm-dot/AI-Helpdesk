@@ -201,6 +201,22 @@ nvidia-smi --id=4           # nach dem ersten Anruf muss hier Ollama auftauchen
 
 `./scripts/preflight.sh` prüft beides und meckert, wenn nur eine Seite gepinnt ist.
 
+**Docker 29 und CDI:** Neuere Docker-Versionen wählen GPUs über CDI aus. Falls
+`--gpus device=4` nicht geht, `--device nvidia.com/gpu=4` aber schon (preflight
+sagt dir das), dann mit dem Overlay starten:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cdi.yml up -d --build
+```
+
+Fehlt die CDI-Spec ganz, hilft:
+
+```bash
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
 ### 2. Profil wählen und Modelle holen
 
 ```bash

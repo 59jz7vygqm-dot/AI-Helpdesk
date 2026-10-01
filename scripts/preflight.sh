@@ -65,15 +65,40 @@ if command -v docker >/dev/null 2>&1; then
   else
     bad "docker compose plugin missing"; hint "apt install docker-compose-plugin"
   fi
-  # The GPU must be visible inside a container, not just on the host.
-  if docker run --rm --gpus "device=$GPU_ID" nvidia/cuda:12.8.1-base-ubuntu22.04 \
-       nvidia-smi -L >/tmp/preflight-gpu.log 2>&1; then
-    ok "containers can use GPU $GPU_ID: $(head -1 /tmp/preflight-gpu.log)"
-  else
-    bad "containers cannot use the GPU (NVIDIA Container Toolkit)"
-    hint "install nvidia-container-toolkit, then: systemctl restart docker"
-    hint "details: /tmp/preflight-gpu.log"
-  fi
+  # The GPU must be visible inside a container, not just on the host. Docker 29
+  # routes --gpus through CDI, and which spelling works depends on how the host
+  # was set up, so try each and report the one that does.
+  GPU_SPEC=""
+  IMAGE=nvidia/cuda:12.8.1-base-ubuntu22.04
+  for spec in "--gpus device=$GPU_ID" "--device nvidia.com/gpu=$GPU_ID" "--gpus all"; do
+    # shellcheck disable=SC2086
+    if docker run --rm $spec "$IMAGE" nvidia-smi -L >/tmp/preflight-gpu.log 2>&1; then
+      GPU_SPEC="$spec"
+      break
+    fi
+  done
+  case "$GPU_SPEC" in
+    "")
+      bad "containers cannot use any GPU"
+      hint "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+      hint "sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
+      hint "details: /tmp/preflight-gpu.log"
+      ;;
+    "--gpus all")
+      warn "only '--gpus all' works, not per-device selection"
+      hint "the container would see every GPU; it uses NVIDIA_VISIBLE_DEVICES=$GPU_ID"
+      hint "regenerate the CDI spec to get per-device selection:"
+      hint "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+      ;;
+    "--device nvidia.com/gpu=$GPU_ID")
+      ok "containers can use GPU $GPU_ID via CDI: $(head -1 /tmp/preflight-gpu.log)"
+      warn "this host needs the CDI form in compose"
+      hint "start with: docker compose -f docker-compose.yml -f docker-compose.cdi.yml up -d --build"
+      ;;
+    *)
+      ok "containers can use GPU $GPU_ID: $(head -1 /tmp/preflight-gpu.log)"
+      ;;
+  esac
 else
   bad "docker not found"
 fi
@@ -110,8 +135,15 @@ if [ "$LLM_BACKEND" = "ollama" ]; then
     fi
   else
     bad "cannot reach Ollama at $OLLAMA_URL"
-    hint "systemctl status ollama"
-    hint "with network_mode: host the container uses this same address"
+    if command -v ollama >/dev/null 2>&1; then
+      hint "ollama is installed but not answering: sudo systemctl status ollama"
+      hint "start it: sudo systemctl enable --now ollama"
+    else
+      hint "not installed: curl -fsSL https://ollama.com/install.sh | sh"
+    fi
+    listening=$(ss -lntp 2>/dev/null | grep -i ollama | awk '{print $4}' | tr '\n' ' ')
+    [ -n "$listening" ] && hint "something ollama-ish listens on: $listening (set OLLAMA_URL)"
+    hint "or point llm.backend=openai at an existing server (e.g. your vLLM)"
   fi
 else
   BASE_URL=$(grep -m1 '^  base_url:' config/config.yaml | awk '{print $2}' | tr -d '"')

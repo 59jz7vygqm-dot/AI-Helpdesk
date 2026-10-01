@@ -1,0 +1,20 @@
+# CDI overlay.
+#
+# Docker 29 selects GPUs through CDI. On hosts where only the CDI form works --
+# preflight.sh says so, and `docker run --device nvidia.com/gpu=4` succeeds while
+# `--gpus device=4` does not -- start with both files:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cdi.yml up -d --build
+#
+# This replaces the deploy.resources reservation with a direct CDI device
+# reference. GPU_ID from .env still selects the card.
+
+services:
+  helpdesk:
+    devices:
+      - "nvidia.com/gpu=${GPU_ID:-0}"
+    deploy:
+      resources:
+        reservations:
+          # Cleared: the CDI device above does the selection instead.
+          devices: []
