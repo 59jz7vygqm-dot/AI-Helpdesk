@@ -165,6 +165,13 @@ class HelpdeskApplication:
         log.info("LLM warm (%d ms for a short completion)", int(llm_ms * 1000))
         if self.kb is not None:
             await self.kb.build()
+            # Loading the index from cache skips the embedder, which would then
+            # load during the caller's first question and cost seconds there.
+            try:
+                await self.kb.search("Testfrage zum Aufwaermen", top_k=1)
+                log.info("knowledge retrieval warm")
+            except Exception:
+                log.warning("could not warm up knowledge retrieval", exc_info=True)
         await self.phrases.prepare_all(self.texts.fixed_phrases())
         log.info("warmup complete in %.1fs", time.monotonic() - started)
 

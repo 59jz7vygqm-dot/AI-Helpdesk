@@ -73,7 +73,7 @@ llm:
   # before the first word. Dead air on a phone call -- keep this false.
   think: false
   options:
-    temperature: 0.3               # low: a helpdesk should be boring
+    temperature: 0.2               # low: a helpdesk should be boring
     top_p: 0.9
     num_predict: 110               # a phone answer is short by design
     num_ctx: 4096
@@ -140,7 +140,8 @@ tts:
     speed: 1.0
 
   cache_dir: /models/phrase-cache   # pre-rendered fixed phrases
-  first_chunk_min_chars: 24         # start speaking this early into the answer
+  # Small on purpose: this decides when the caller hears anything at all.
+  first_chunk_min_chars: 14         # start speaking this early into the answer
   min_chunk_chars: 60
   max_chunk_chars: 220
 
@@ -153,7 +154,9 @@ knowledge:
   overlap_chars: 120
   context_chars: 1800               # how much knowledge goes into the prompt
   dense_weight: 0.72                # rest is BM25; lower it if exact terms matter
-  min_score: 0.28                   # below this, the agent says it cannot help
+  # Below this the agent says it cannot help. Too low and a loosely related
+  # passage gets passed in as context, which invites invented instructions.
+  min_score: 0.40
   embeddings:
     backend: fastembed              # CPU: no VRAM, no extra Ollama model to pull
     # fastembed only serves models it ships as ONNX, not arbitrary HF ids.

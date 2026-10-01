@@ -392,6 +392,41 @@ bevor das erste Wort gesprochen werden kann.
 
 ---
 
+## Wenn das Gespräch sich falsch anfühlt
+
+Die Reihenfolge, in der es sich lohnt zu suchen — aus einem echten ersten Anruf
+gelernt:
+
+**1. Steht in der Wissensdatenbank überhaupt eine Antwort?** Das ist mit Abstand
+der größte Hebel und wird meist zuletzt geprüft. Solange `knowledge/` die
+Beispieldateien enthält, kann der Agent auf echte Fragen nur daneben antworten.
+Die Logzeile `kb hits for '...'` zeigt, was er gefunden hat und wie gut es passt:
+
+```
+kb hits for 'Das Display ist schwarz': Der Drucker druckt nicht(0.50), Mein Bildschirm bleibt schwarz(0.49)
+```
+
+Zwei mittelmäßige Treffer, keiner beantwortet die Frage — und genau dann neigt
+ein Sprachmodell dazu, Schritte zu erfinden. Dagegen hilft nicht am Prompt zu
+drehen, sondern der Wissensdatenbank einen Abschnitt zu dieser Frage zu geben.
+
+**2. Ist `min_score` hoch genug?** Lieber kein Kontext und weiterleiten als ein
+unpassender Treffer, aus dem improvisiert wird. 0,40 ist der Startwert; wenn der
+Agent zu oft weiterleitet, in 0,05er-Schritten senken.
+
+**3. Erst dann an der Latenz drehen.** Und dort zuerst die Sprachausgabe: Im Log
+steht pro Antwort, wohin die Zeit ging.
+
+```
+turn 1: response 5975 ms (asr 0*, kb 2862, llm_ttft 266, tts 5975)
+```
+
+Hier ist alles Synthese — das Sprachmodell braucht 266 ms, die Erkennung dank
+Vorausberechnung 0 ms. Die Eingabe zu streamen würde an solchen Zahlen nichts
+ändern. Was wirkt: die `medium`-Stimme statt `high` und ein kleiner erster
+Sprachblock (`tts.first_chunk_min_chars`), damit der Agent nach dem ersten
+Teilsatz zu sprechen beginnt statt nach dem ganzen.
+
 ## Konfiguration
 
 Alles in `config/config.yaml`, kommentiert. Jeder Wert ist per Umgebungsvariable

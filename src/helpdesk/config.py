@@ -62,7 +62,7 @@ DEFAULTS: Dict[str, Any] = {
         # Reasoning models would spend seconds thinking before the first word.
         "think": False,
         "options": {
-            "temperature": 0.3,
+            "temperature": 0.2,
             "top_p": 0.9,
             "num_predict": 110,
             "num_ctx": 4096,
@@ -120,7 +120,9 @@ DEFAULTS: Dict[str, Any] = {
             "speed": 1.0,
         },
         "cache_dir": "/models/phrase-cache",
-        "first_chunk_min_chars": 24,
+        # Deliberately small: the first chunk decides when the caller hears
+        # anything, and a clause of 15 characters already sounds natural.
+        "first_chunk_min_chars": 14,
         "min_chunk_chars": 60,
         "max_chunk_chars": 220,
     },
@@ -133,7 +135,10 @@ DEFAULTS: Dict[str, Any] = {
         "overlap_chars": 120,
         "context_chars": 1800,
         "dense_weight": 0.72,
-        "min_score": 0.28,
+        # Raised after a live call: at 0.28 a loosely related passage was passed
+        # in as context and the model improvised instructions from it. Better to
+        # have no context and hand over.
+        "min_score": 0.40,
         "embeddings": {
             "backend": "ollama",
             "model": "bge-m3",
