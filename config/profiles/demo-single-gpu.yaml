@@ -1,3 +1,33 @@
+# Profile: demo on one dedicated GPU (e.g. an otherwise idle L4).
+#
+# Everything the agent needs runs on that one card, and nothing else does.
+# Written for a 23 GB L4 with ~15 GB in use, so there is room to grow.
+#
+#   Ollama  qwen2.5:7b-instruct Q4    ~5.2 GB   runs on the HOST, pin it!
+#   ASR     large-v3-turbo float16    ~2.0 GB   in the container
+#   TTS     Qwen3-TTS 1.7B bfloat16   ~8.0 GB   in the container
+#   KB      fastembed (CPU)               0
+#   ------------------------------------------
+#                                    ~15.2 GB of 23 GB
+#
+# IMPORTANT on a multi-GPU host, both sides must be pinned to the same free card:
+#
+#   container -> GPU_ID=4 in .env
+#   ollama    -> CUDA_VISIBLE_DEVICES=4 in its systemd unit, see the README
+#
+# Without that, Ollama grabs GPU 0 and fails if that card is full.
+#
+# Copy over config/config.yaml to use it.
+
+# AI Helpdesk configuration.
+#
+# Every scalar here can be overridden from the environment as
+# HELPDESK_<SECTION>_<KEY>, nested keys included:
+#   HELPDESK_SIP_SERVER_HOST=10.0.0.1
+#   HELPDESK_VAD_END_SILENCE_MS=350
+#   HELPDESK_TTS_PIPER_MODEL_PATH=/models/piper/de_DE-thorsten-high.onnx
+# Keep the SIP password in the environment, not in this file.
+
 # AI Helpdesk configuration.
 #
 # Every scalar here can be overridden from the environment as
@@ -138,11 +168,11 @@ knowledge:
   dense_weight: 0.72                # rest is BM25; lower it if exact terms matter
   min_score: 0.28                   # below this, the agent says it cannot help
   embeddings:
-    backend: ollama                 # or: fastembed (CPU, no VRAM)
-    model: bge-m3                   # multilingual, strong on German
+    backend: fastembed              # CPU: no VRAM, no extra Ollama model to pull
+    model: intfloat/multilingual-e5-small
     batch_size: 16
-    query_prefix: ""                # for e5 models use "query: "
-    document_prefix: ""             # for e5 models use "passage: "
+    query_prefix: "query: "
+    document_prefix: "passage: "
     cache_dir: /models/fastembed
     threads: 4
 

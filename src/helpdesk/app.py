@@ -15,6 +15,7 @@ from .kb.embedder import build_embedder
 from .kb.index import KnowledgeBase
 from .llm.agent import HelpdeskAgent
 from .llm.ollama_client import OllamaClient, OllamaError
+from .llm.openai_client import LlmError, OpenAiCompatibleClient
 from .session import CallSession, DialogTexts
 from .sip.ua import Call, SipAccount, SipUserAgent
 from .tts.registry import PhraseCache, build_synthesizer
@@ -64,18 +65,33 @@ class HelpdeskApplication:
         )
 
         llm_config = config["llm"]
-        self.llm = OllamaClient(
-            base_url=llm_config["base_url"],
-            model=llm_config["model"],
-            keep_alive=str(llm_config.get("keep_alive", "-1")),
-            timeout=float(llm_config.get("timeout", 60)),
-            options=llm_config.get("options") or {},
-            think=llm_config.get("think", False),
-        )
+        backend = str(llm_config.get("backend", "ollama")).lower()
+        if backend in ("openai", "openai_compatible", "vllm", "http"):
+            self.llm = OpenAiCompatibleClient(
+                base_url=llm_config["base_url"],
+                model=llm_config["model"],
+                api_key=str(llm_config.get("api_key", "none")),
+                timeout=float(llm_config.get("timeout", 60)),
+                options=llm_config.get("options") or {},
+                think=llm_config.get("think", False),
+            )
+        elif backend == "ollama":
+            self.llm = OllamaClient(
+                base_url=llm_config["base_url"],
+                model=llm_config["model"],
+                keep_alive=str(llm_config.get("keep_alive", "-1")),
+                timeout=float(llm_config.get("timeout", 60)),
+                options=llm_config.get("options") or {},
+                think=llm_config.get("think", False),
+            )
+        else:
+            raise SystemExit(
+                f"unknown llm.backend {backend!r} (expected 'ollama' or 'openai')"
+            )
         try:
             await self.llm.ensure_model()
-        except OllamaError as exc:
-            raise SystemExit(f"Ollama is not usable: {exc}") from exc
+        except (OllamaError, LlmError) as exc:
+            raise SystemExit(f"the language model is not usable: {exc}") from exc
 
         asr_config = config["asr"]
         self.recognizer = FasterWhisperRecognizer(

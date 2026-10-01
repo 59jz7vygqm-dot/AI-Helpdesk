@@ -49,7 +49,11 @@ DEFAULTS: Dict[str, Any] = {
         "cpu_threads": 4,
     },
     "llm": {
+        # ollama = local Ollama daemon | openai = any OpenAI-compatible server
+        # (vLLM, TGI, llama.cpp server, LM Studio)
+        "backend": "ollama",
         "base_url": "http://127.0.0.1:11434",
+        "api_key": "none",
         "model": "qwen2.5:7b-instruct-q4_K_M",
         "keep_alive": "-1",
         "timeout": 60,
