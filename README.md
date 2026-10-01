@@ -100,6 +100,9 @@ In `config/profiles/` liegen drei vollständige Konfigurationen. Eine davon übe
 cp config/profiles/demo-single-gpu.yaml config/config.yaml
 ```
 
+`config/config.yaml` is yours and is gitignored, so `git pull` never touches your
+settings. The profiles and `config.example.yaml` are the tracked copies.
+
 `demo-single-gpu.yaml` ist der Startpunkt für „eine freie L4": gute Stimme,
 kleines Sprachmodell, Embeddings auf der CPU — also kein zweites Ollama-Modell
 zum Herunterladen.

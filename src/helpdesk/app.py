@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 import time
@@ -223,6 +224,16 @@ class HelpdeskApplication:
 async def amain(config_path: Optional[str]) -> int:
     config = load_config(config_path)
     setup_logging((config.get("logging") or {}).get("level", "INFO"))
+
+    if config_path and not os.path.exists(config_path):
+        # Not fatal: the environment may carry everything needed. But say so,
+        # because running on defaults is rarely what someone intended.
+        log.warning(
+            "%s does not exist -- running on defaults plus environment overrides. "
+            "Copy a profile into place: cp config/profiles/demo-single-gpu.yaml %s",
+            config_path,
+            config_path,
+        )
 
     problems = validate(config)
     if problems:
