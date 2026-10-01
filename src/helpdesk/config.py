@@ -64,7 +64,7 @@ DEFAULTS: Dict[str, Any] = {
         "options": {
             "temperature": 0.3,
             "top_p": 0.9,
-            "num_predict": 160,
+            "num_predict": 110,
             "num_ctx": 4096,
             # Stop as soon as the model starts a second speaker turn.
             "stop": ["\nANRUFER", "\nAnrufer:", "\nUser:"],
@@ -90,9 +90,12 @@ DEFAULTS: Dict[str, Any] = {
             "streaming": True,
         },
         "piper": {
-            "model_path": "/models/piper/de_DE-thorsten-high.onnx",
+            # medium, not high: the call is 8 kHz, so the extra bandwidth is
+            # discarded while the synthesis cost is not.
+            "model_path": "/models/piper/de_DE-thorsten-medium.onnx",
             "config_path": "",
             "length_scale": 1.0,
+            "threads": 4,
             "noise_scale": 0.667,
             "noise_w": 0.8,
             "use_cuda": False,
@@ -171,7 +174,7 @@ DEFAULTS: Dict[str, Any] = {
         "transfer_dtmf_feature_code": "##",
         "transfer_dtmf_terminator": "",
         "transfer_dtmf_delay_ms": 700,
-        "max_sentences": 3,
+        "max_sentences": 2,
         "history_turns": 10,
         "extra_instructions": "",
         "silence_prompt_after_ms": 7000,

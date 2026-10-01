@@ -82,7 +82,7 @@ llm:
   options:
     temperature: 0.3               # low: a helpdesk should be boring
     top_p: 0.9
-    num_predict: 160               # a phone answer is short by design
+    num_predict: 110               # a phone answer is short by design
     num_ctx: 4096
     stop: ["\nANRUFER", "\nAnrufer:", "\nUser:"]
 
@@ -116,9 +116,13 @@ tts:
     streaming: true              # used when the installed build exposes it
 
   piper:
-    model_path: /models/piper/de_DE-thorsten-high.onnx
+    # medium, not high: the call is 8 kHz, so "high" spends several times the
+    # synthesis time on detail that the downsample throws away. Watch the log for
+    # "rtf" above 0.3 -- that means synthesis is the bottleneck.
+    model_path: /models/piper/de_DE-thorsten-medium.onnx
     config_path: ""                # defaults to model_path + .json
     length_scale: 1.0              # >1 slower, <1 faster
+    threads: 4                     # 0 = let onnxruntime decide
     noise_scale: 0.667
     noise_w: 0.8
     use_cuda: false                # CPU is fast enough and keeps VRAM free
@@ -225,7 +229,7 @@ dialog:
   transfer_dtmf_feature_code: "##"
   transfer_dtmf_terminator: ""      # some dialplans want a trailing "#"
   transfer_dtmf_delay_ms: 700       # pause between feature code and number
-  max_sentences: 3
+  max_sentences: 2                  # one or two; longer feels like a monologue
   history_turns: 10
   extra_instructions: ""            # appended to the system prompt verbatim
 

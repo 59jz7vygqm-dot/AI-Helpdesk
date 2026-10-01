@@ -17,7 +17,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from ..audio.codec import pcm16_to_float32
+from ..audio.codec import pcm16_to_float32, rms_dbfs
 from .base import Recognizer, Transcript
 
 log = logging.getLogger(__name__)
@@ -147,19 +147,31 @@ class FasterWhisperRecognizer(Recognizer):
         text = " ".join(part.strip() for part in parts if part.strip()).strip()
         avg_logprob = float(np.mean(logprobs)) if logprobs else 0.0
         no_speech_prob = float(np.max(no_speech)) if no_speech else 0.0
+        level_db = rms_dbfs(pcm)
 
-        if text and (
-            _looks_like_hallucination(text)
-            or avg_logprob < self.min_avg_logprob
-            or no_speech_prob > self.max_no_speech_prob
-        ):
-            log.debug(
-                "discarding low-confidence transcript %r (logprob %.2f, no_speech %.2f)",
-                text,
-                avg_logprob,
-                no_speech_prob,
+        reject = None
+        if text:
+            if _looks_like_hallucination(text):
+                reject = "looks like a hallucination"
+            elif avg_logprob < self.min_avg_logprob:
+                reject = f"logprob {avg_logprob:.2f} < {self.min_avg_logprob}"
+            elif no_speech_prob > self.max_no_speech_prob:
+                reject = f"no_speech {no_speech_prob:.2f} > {self.max_no_speech_prob}"
+
+        if reject:
+            # At INFO: a discarded transcript is the most common reason a caller
+            # feels unheard, and the threshold that caused it is the fix.
+            log.info(
+                "discarded transcript %r (%s; %.0f ms at %.1f dBFS)",
+                text, reject, pcm.size * 1000 / 16000, level_db,
             )
             text = ""
+        elif not text:
+            log.info(
+                "recognised nothing in %.0f ms of audio at %.1f dBFS "
+                "(no_speech %.2f) -- too quiet, or the caller did not speak",
+                pcm.size * 1000 / 16000, level_db, no_speech_prob,
+            )
 
         return Transcript(
             text=text,

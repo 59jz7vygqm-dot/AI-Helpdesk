@@ -470,6 +470,27 @@ statt zu improvisieren. `temperature` in `llm.options` runter hilft zusätzlich.
 **Er versteht Fachbegriffe nicht** — `asr.initial_prompt` mit den eigenen
 Produktnamen und Fehlercodes füllen; das lenkt die Erkennung.
 
+**„nothing recognised" trotz Sprechen** — das Log nennt jetzt den Grund: die Dauer
+der Äußerung, den Pegel in dBFS und ob ein Transkript verworfen wurde. Typische
+Fälle:
+
+- *Pegel unter etwa −40 dBFS*: Die Leitung ist zu leise, oder die PBX schickt
+  kaum Audio. Prüfen, ob der Codec stimmt (im Log `answered … with PCMA`).
+- *`discarded transcript`*: Erkannt, aber als unsicher verworfen.
+  `asr.min_avg_logprob` auf `-1.4` lockern oder `asr.max_no_speech_prob` auf
+  `0.85`.
+- *Direkt nach der Begrüßung, ohne dass jemand sprach*: Die Sprachaktivitäts-
+  erkennung hat auf Leitungsrauschen angeschlagen. `vad.aggressiveness` auf 3,
+  oder `vad.start_frames` auf 5.
+
+**Die Antwort dauert, bis sie kommt** — im Log auf `rtf` achten. Über 0,3 heißt,
+die Sprachausgabe ist der Engpass; dann die `medium`- statt der `high`-Stimme
+nehmen (bei 8 kHz hörst du keinen Unterschied) und `tts.piper.threads` setzen.
+
+**Er redet zu lang** — `dialog.max_sentences: 2` und `llm.options.num_predict`
+runter. Am Telefon sind zwei Sätze plus Rückfrage besser als eine vollständige
+Anleitung.
+
 ---
 
 ## Was wie getestet ist — und was nicht

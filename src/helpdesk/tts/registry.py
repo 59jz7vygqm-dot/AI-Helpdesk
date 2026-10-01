@@ -36,6 +36,7 @@ def build_synthesizer(config: dict) -> Synthesizer:
             noise_scale=float(piper.get("noise_scale", 0.667)),
             noise_w=float(piper.get("noise_w", 0.8)),
             use_cuda=bool(piper.get("use_cuda", False)),
+            threads=int(piper.get("threads", 0)),
         )
 
     if backend in ("qwen3", "qwen3-tts", "qwen"):

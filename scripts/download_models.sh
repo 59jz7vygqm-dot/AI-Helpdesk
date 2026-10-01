@@ -9,9 +9,10 @@ OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 LLM_MODEL="${LLM_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
 EMBED_MODEL="${EMBED_MODEL:-bge-m3}"
 
-# Piper voices, best first for a service line.  "high" is 22.05 kHz; the extra
-# quality survives the downsample to 8 kHz better than you would expect.
-VOICE="${VOICE:-de_DE-thorsten-high}"
+# Piper voices. "medium" is the right default for telephony: the call is 8 kHz
+# anyway, so "high" (22.05 kHz) spends several times the synthesis time on detail
+# that is discarded on the way to the caller.
+VOICE="${VOICE:-de_DE-thorsten-medium}"
 BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE"
 
 declare -A VOICE_PATHS=(
