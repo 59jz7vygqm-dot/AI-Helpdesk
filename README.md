@@ -155,9 +155,18 @@ wenigen Sekunden. Läuft in einem eigenen Container, weil sein PyPI-Paket
 Python 3.13 verlangt und das Agent-Image auf einer CUDA-Basis mit 3.10 steht:
 
 ```bash
-cp config/profiles/quality-qwen.yaml config/config.yaml
 sudo docker compose -f docker-compose.yml -f docker-compose.qwen.yml up -d --build
 sudo docker compose logs -f qwen-tts
+```
+
+Das Overlay verbindet beides selbst: der Agent wartet, bis die Stimme bereit ist
+(`depends_on: service_healthy`), und bekommt `tts.backend: openai` samt Adresse
+als Umgebungsvariable gesetzt. Ein `TTS_BACKEND=piper`, das noch in deiner `.env`
+steht, kann dir also nicht mehr dazwischenkommen. Zurück zu Piper kommst du,
+indem du das Overlay weglässt:
+
+```bash
+sudo docker compose up -d        # ohne -f ...qwen.yml -> wieder Piper
 ```
 
 Der erste Start lädt ~5 GB von Hugging Face ins `/models`-Volume. Warte auf:
