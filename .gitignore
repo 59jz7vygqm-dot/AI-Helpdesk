@@ -9,7 +9,8 @@ models/
 *.npz
 
 # Call transcripts may contain personal data
-transcripts/
+transcripts/*
+!transcripts/.gitkeep
 
 __pycache__/
 *.py[cod]

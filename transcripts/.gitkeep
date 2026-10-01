@@ -1,0 +1,2 @@
+# One JSON per call when logging.transcript_dir is set.
+# Gitignored: call transcripts may contain personal data.
