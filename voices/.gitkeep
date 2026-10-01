@@ -1,0 +1,2 @@
+# Piper voice files land here (download_models.sh).
+# Mounted read-only into the container at /models/piper.
