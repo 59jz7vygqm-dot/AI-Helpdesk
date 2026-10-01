@@ -443,8 +443,17 @@ Was tatsächlich wirkt, in der Reihenfolge der Wirkung:
 | `tts.piper.use_cuda: true` | Realtime-Faktor ~0,3 → unter 0,05 | ~300 MB VRAM, Image mit `TTS_PROFILE=quality` |
 | `tts.piper.threads` auf die Kernzahl | Synthese 2–3× schneller auf CPU | nichts |
 | `medium`-Stimme statt `high` | ~3× schnellere Synthese | bei 8 kHz nicht hörbar |
+| kurzer Prompt + `top_k: 2` | weniger Prefill → `llm_ttft` runter | weniger Kontext pro Antwort |
 | `tts.first_chunk_min_chars: 14` | Sprechbeginn nach Teilsatz statt Satz | minimal andere Betonung |
 | `vad.end_silence_ms: 320` | 100 ms weniger Wartezeit pro Turn | schneidet eher mal jemanden ab |
+
+**Zum Prefill, weil es leicht übersehen wird:** Das Modell liest bei *jedem* Turn
+den System-Prompt, die Gesprächshistorie und die gefundenen Wissenspassagen neu.
+Jede Regel, die man dem Prompt hinzufügt, und jeder zusätzliche `top_k`-Treffer
+kostet deshalb Zeit bei jeder einzelnen Antwort. Als in diesem Projekt der
+System-Prompt von 3.555 auf 1.403 Zeichen gekürzt und `top_k` von 3 auf 2 gesenkt
+wurde, fielen rund 700 Tokens Prefill pro Turn weg — vorher war `llm_ttft` auf
+380 ms gestiegen, allein durch zusätzliche Prompt-Regeln.
 
 Zum Nachrechnen: `response_ms` im Log ist die Zeit von „Anrufer verstummt" bis
 „erstes Audio raus". Die Sprechpause (`end_silence_ms`) kommt davor noch dazu —

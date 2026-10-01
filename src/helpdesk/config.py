@@ -134,10 +134,13 @@ DEFAULTS: Dict[str, Any] = {
         "enabled": True,
         "directory": "/app/knowledge",
         "cache_path": "/models/kb-index.npz",
-        "top_k": 3,
+        # Every retrieved chunk is re-read by the model on every single turn, so
+        # this trades directly against time-to-first-token. Two good passages
+        # answer a helpdesk question; a third mostly adds prefill and distraction.
+        "top_k": 2,
         "max_chars": 900,
         "overlap_chars": 120,
-        "context_chars": 1800,
+        "context_chars": 1100,
         "dense_weight": 0.72,
         # Raised after a live call: at 0.28 a loosely related passage was passed
         # in as context and the model improvised instructions from it. Better to
@@ -200,7 +203,9 @@ DEFAULTS: Dict[str, Any] = {
         "transfer_dtmf_terminator": "",
         "transfer_dtmf_delay_ms": 700,
         "max_sentences": 2,
-        "history_turns": 10,
+        # Enough for a phone call to stay coherent without the prompt growing
+        # through a long conversation.
+        "history_turns": 6,
         "extra_instructions": "",
         "silence_prompt_after_ms": 7000,
         "silence_hangup_after_ms": 20000,

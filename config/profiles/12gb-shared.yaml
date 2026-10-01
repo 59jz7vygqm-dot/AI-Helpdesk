@@ -155,10 +155,12 @@ knowledge:
   enabled: true
   directory: /app/knowledge         # markdown files, split on headings
   cache_path: /models/kb-index.npz  # rebuilt automatically when the text changes
-  top_k: 3
+  # Each chunk is re-read by the model every turn, so this trades directly
+  # against response time. Two passages answer a helpdesk question.
+  top_k: 2
   max_chars: 900                    # chunk size
   overlap_chars: 120
-  context_chars: 1800               # how much knowledge goes into the prompt
+  context_chars: 1100               # how much knowledge goes into the prompt
   dense_weight: 0.72                # rest is BM25; lower it if exact terms matter
   # Below this the agent says it cannot help. Too low and a loosely related
   # passage gets passed in as context, which invites invented instructions.
@@ -246,7 +248,7 @@ dialog:
   transfer_dtmf_terminator: ""      # some dialplans want a trailing "#"
   transfer_dtmf_delay_ms: 700       # pause between feature code and number
   max_sentences: 2                  # one or two; longer feels like a monologue
-  history_turns: 10
+  history_turns: 6
   extra_instructions: ""            # appended to the system prompt verbatim
 
   silence_prompt_after_ms: 7000     # ask "are you there?"
