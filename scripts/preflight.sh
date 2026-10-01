@@ -7,6 +7,8 @@ cd "$(dirname "$0")/.."
 PASS=0
 WARN=0
 FAIL=0
+# Not guaranteed to be exported (cron, some sudo configs), and set -u is on.
+ME="${USER:-$(id -un 2>/dev/null || echo "$(whoami)")}"
 
 # Logs go to unique paths: a leftover file from a run as another user would make
 # the redirection fail, which looked like the command itself failing.
@@ -89,10 +91,19 @@ echo
 echo "=== 2. Docker ==="
 if command -v docker >/dev/null 2>&1; then
   ok "docker $(docker --version | sed 's/Docker version //;s/,.*//')"
-  if ! docker info >/dev/null 2>&1; then
-    warn "this user cannot talk to the docker daemon"
-    hint "run every docker command with sudo, or: sudo usermod -aG docker $USER"
-    hint "then log out and back in"
+  # Decide once how docker can be reached; everything below uses $DOCKER.
+  DOCKER=""
+  if docker info >/dev/null 2>&1; then
+    DOCKER="docker"
+  elif sudo -n docker info >/dev/null 2>&1; then
+    DOCKER="sudo docker"
+    warn "docker needs sudo for this user"
+    hint "every compose command too: sudo docker compose up -d --build"
+    hint "or fix it once: sudo usermod -aG docker $ME  (then re-login)"
+  else
+    warn "cannot reach the docker daemon as $ME"
+    hint "fix it once: sudo usermod -aG docker $ME  (then re-login)"
+    hint "or re-run this script with sudo to finish the checks"
   fi
   if docker compose version >/dev/null 2>&1; then
     ok "docker compose available"
@@ -102,21 +113,30 @@ if command -v docker >/dev/null 2>&1; then
   # The GPU must be visible inside a container, not just on the host. Docker 29
   # routes --gpus through CDI, and which spelling works depends on how the host
   # was set up, so try each and report the one that does.
+  # shellcheck disable=SC2034
   GPU_SPEC=""
   IMAGE=nvidia/cuda:12.8.1-base-ubuntu22.04
-  for spec in "--gpus device=$GPU_ID" "--device nvidia.com/gpu=$GPU_ID" "--gpus all"; do
-    # shellcheck disable=SC2086
-    if docker run --rm $spec "$IMAGE" nvidia-smi -L >"$LOGDIR/gpu.log" 2>&1; then
-      GPU_SPEC="$spec"
-      break
-    fi
-  done
-  case "$GPU_SPEC" in
+  if [ -z "$DOCKER" ]; then
+    # Without daemon access the probe says nothing about the GPU; reporting a
+    # failure here would point at the wrong thing entirely.
+    warn "GPU-in-container check skipped: no docker access"
+  else
+    for spec in "--gpus device=$GPU_ID" "--device nvidia.com/gpu=$GPU_ID" "--gpus all"; do
+      # shellcheck disable=SC2086
+      if $DOCKER run --rm $spec "$IMAGE" nvidia-smi -L >"$LOGDIR/gpu.log" 2>&1; then
+        GPU_SPEC="$spec"
+        break
+      fi
+    done
+  fi
+  case "${DOCKER:+$GPU_SPEC}" in
     "")
-      bad "containers cannot use any GPU"
-      hint "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
-      hint "sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
-      hint "details: $LOGDIR/gpu.log"
+      if [ -n "$DOCKER" ]; then
+        bad "containers cannot use any GPU"
+        hint "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+        hint "sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
+        hint "details: $LOGDIR/gpu.log"
+      fi
       ;;
     "--gpus all")
       warn "only '--gpus all' works, not per-device selection"
@@ -261,4 +281,10 @@ if [ "$FAIL" -gt 0 ]; then
   echo "Fix the problems above before starting."
   exit 1
 fi
-echo "Ready. Next:  docker compose up -d --build && docker compose logs -f"
+COMPOSE="${DOCKER:-docker} compose"
+if [ "$GPU_SPEC" = "--device nvidia.com/gpu=$GPU_ID" ]; then
+  COMPOSE="$COMPOSE -f docker-compose.yml -f docker-compose.cdi.yml"
+fi
+echo "Ready. Next:"
+echo "  $COMPOSE up -d --build"
+echo "  $COMPOSE logs -f"
