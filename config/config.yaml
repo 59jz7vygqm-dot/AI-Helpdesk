@@ -36,7 +36,7 @@ asr:
   model: large-v3-turbo            # ~1.6 GB at int8; distil-large-v3 is smaller
   device: cuda
   device_index: 0
-  compute_type: int8_float16       # float16 is marginally better, ~2x the VRAM
+  compute_type: float16            # float16 for quality; int8_float16 halves VRAM
   language: de                     # pin it; autodetect costs time and can flip
   beam_size: 1                     # greedy: beam search doubles latency
   download_root: /models/whisper
@@ -48,9 +48,15 @@ asr:
 
 llm:
   base_url: "http://127.0.0.1:11434"
+  # 7B is the sweet spot for a phone helpdesk: answers are short and grounded in
+  # retrieved text, so a 14B rarely says anything better -- it just answers later.
+  # Spend spare VRAM on the voice instead; that is what callers notice.
   model: "qwen2.5:7b-instruct-q4_K_M"
   keep_alive: "-1"                 # keep the model resident; never pay a reload
   timeout: 60
+  # Reasoning models (qwen3, deepseek-r1) would think silently for seconds
+  # before the first word. Dead air on a phone call -- keep this false.
+  think: false
   options:
     temperature: 0.3               # low: a helpdesk should be boring
     top_p: 0.9
@@ -59,10 +65,30 @@ llm:
     stop: ["\nANRUFER", "\nAnrufer:", "\nUser:"]
 
 tts:
-  # piper      - CPU, ~30 ms to first audio, robotic but never stalls
-  # chatterbox - GPU (~3 GB), natural and clonable, ~300-500 ms to first audio
+  # qwen3      - GPU, the quality option: Apache-2.0, German, voice cloning
+  #              0.6B ~4 GB VRAM / 1.7B ~8 GB. THE default.
+  # piper      - CPU, ~30 ms to first audio, robotic but never stalls. Fallback
+  #              and the thing to switch to when diagnosing latency.
+  # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages
   # openai     - any server exposing /v1/audio/speech (Kokoro, XTTS, LocalAI)
-  backend: piper
+  backend: qwen3
+
+  qwen3:
+    # 1.7B sounds clearly better than 0.6B; drop to 0.6B only if VRAM is tight.
+    model_id: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+    device: cuda:0
+    dtype: bfloat16
+    language: German             # the model wants a language name, not a code
+    # custom = a built-in speaker | clone = your own voice | design = describe it
+    mode: custom
+    speaker: ""                  # see scripts/list_qwen_voices.py
+    instruct: ""                 # e.g. "ruhig, freundlich, sachlich"
+    # mode: clone -- 3-20 s of clean speech plus its exact transcript
+    reference_audio: ""
+    reference_text: ""
+    attn_implementation: ""      # "flash_attention_2" if installed
+    sample_rate: 24000
+    streaming: true              # used when the installed build exposes it
 
   piper:
     model_path: /models/piper/de_DE-thorsten-high.onnx
@@ -127,6 +153,17 @@ vad:
   barge_in_ms: 260                  # speech needed to interrupt the agent
   speculative_asr: true
 
+  # Echo guard: stops the agent's own voice, echoed back by a speakerphone or
+  # mobile, from being mistaken for the caller interrupting. Compares incoming
+  # audio against what was just transmitted.
+  echo_guard: true
+  echo_attenuation_db: 12.0         # quieter than this below our own level = echo
+  echo_correlation: 0.72            # envelope correlation that counts as echo
+
+  # When an interruption turns out to be just "mhm" or "alles klar", carry on
+  # with the unheard rest of the answer instead of starting over.
+  resume_on_backchannel: true
+
 dialog:
   company: "der Beispiel GmbH"
   agent_name: "Alex"
@@ -146,6 +183,18 @@ dialog:
   thinking: ""
 
   transfer_number: "200"            # REQUIRED: extension, queue or full number
+
+  # How to hand the call over:
+  #   auto  - try SIP REFER, fall back to the DTMF feature code (recommended)
+  #   refer - REFER only; the clean way when you control the PBX
+  #   dtmf  - feature code only; needed when a managed PBX sets
+  #           allow_transfer=no on the endpoint, which blocks REFER
+  transfer_method: auto
+  # Asterisk's blindxfer sequence from features.conf. Vanilla Asterisk commonly
+  # uses #1, FreePBX commonly ##. There is no safe guess -- ask your provider.
+  transfer_dtmf_feature_code: "##"
+  transfer_dtmf_terminator: ""      # some dialplans want a trailing "#"
+  transfer_dtmf_delay_ms: 700       # pause between feature code and number
   max_sentences: 3
   history_turns: 10
   extra_instructions: ""            # appended to the system prompt verbatim

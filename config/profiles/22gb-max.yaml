@@ -1,3 +1,18 @@
+# Profile: ~22 GB of VRAM -- everything turned up.
+#
+# Only worth it if the L4 is yours alone and nothing else holds VRAM. The larger
+# language model costs roughly 150-250 ms more on every single answer, so compare
+# it against 16gb-quality before keeping it.
+#
+#   ASR  large-v3-turbo float16  ~2.0 GB
+#   LLM  qwen3:14b Q4            ~10.3 GB
+#   TTS  Qwen3-TTS 1.7B bf16     ~8.0 GB
+#   KB   fastembed (CPU)             0
+#   ----------------------------------
+#                                ~20.3 GB
+#
+# Copy over config/config.yaml to use it.
+
 # AI Helpdesk configuration.
 #
 # Every scalar here can be overridden from the environment as
@@ -51,7 +66,7 @@ llm:
   # 7B is the sweet spot for a phone helpdesk: answers are short and grounded in
   # retrieved text, so a 14B rarely says anything better -- it just answers later.
   # Spend spare VRAM on the voice instead; that is what callers notice.
-  model: "qwen2.5:7b-instruct-q4_K_M"
+  model: "qwen3:14b"
   keep_alive: "-1"                 # keep the model resident; never pay a reload
   timeout: 60
   # Reasoning models (qwen3, deepseek-r1) would think silently for seconds
@@ -133,11 +148,11 @@ knowledge:
   dense_weight: 0.72                # rest is BM25; lower it if exact terms matter
   min_score: 0.28                   # below this, the agent says it cannot help
   embeddings:
-    backend: ollama                 # or: fastembed (CPU, no VRAM)
-    model: bge-m3                   # multilingual, strong on German
+    backend: fastembed              # CPU: keeps all VRAM for ASR/LLM/TTS
+    model: intfloat/multilingual-e5-small
     batch_size: 16
-    query_prefix: ""                # for e5 models use "query: "
-    document_prefix: ""             # for e5 models use "passage: "
+    query_prefix: "query: "
+    document_prefix: "passage: "
     cache_dir: /models/fastembed
     threads: 4
 

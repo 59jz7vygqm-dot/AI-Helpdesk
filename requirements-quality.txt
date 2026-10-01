@@ -1,0 +1,23 @@
+# The quality voice stack.  Installed on top of requirements.txt when the image
+# is built with TTS_PROFILE=quality (the default).
+#
+# torch is installed from the CUDA 12.8 index in the Dockerfile, not here, so
+# that the wheel matches the base image.
+
+# Qwen3-TTS: Apache-2.0, German, voice cloning, the quality backend
+qwen3-tts>=0.1.0
+
+# Reading reference audio for voice cloning
+soundfile>=0.12
+
+# Needed by the Qwen3-TTS and Chatterbox model loaders
+transformers>=4.46
+accelerate>=1.0
+huggingface-hub>=0.26
+
+# CPU embeddings, so the knowledge base costs no VRAM when the GPU is full
+fastembed>=0.4
+
+# Alternative quality voice (MIT, 23 languages). Uncomment to have both
+# available and switch with tts.backend at runtime:
+# chatterbox-tts>=0.1.4

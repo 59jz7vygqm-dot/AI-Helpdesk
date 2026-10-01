@@ -193,3 +193,43 @@ class SentenceStreamer:
     def reset(self) -> None:
         self._buffer = ""
         self._emitted = 0
+
+
+#: Short acknowledgements a caller makes while listening.  Treating these as a
+#: new question is one of the most obviously robotic things a voice agent can do:
+#: the caller says "mhm" to show they are following, and the agent restarts.
+BACKCHANNEL_WORDS = {
+    "ja", "jo", "joa", "jep", "jepp", "yep", "ok", "okay", "oke", "mhm", "mhh",
+    "hm", "hmm", "ähm", "ah", "aha", "achso", "soso", "genau", "richtig",
+    "stimmt", "klar", "sicher", "gut", "schön", "verstehe", "verstanden",
+    "alles", "jawohl", "eben", "logisch", "natürlich", "danke", "super",
+    "perfekt", "prima", "interessant", "wow", "oh", "mm", "mmh", "yeah",
+}
+
+#: multi-word acknowledgements, normalised
+BACKCHANNEL_PHRASES = {
+    "alles klar", "ach so", "ja gut", "ja klar", "ja genau", "ja okay",
+    "okay gut", "ja danke", "ja stimmt", "ja sicher", "mhm ja", "ja ja",
+    "verstehe ja", "ja verstehe", "ach ja", "na gut", "soweit klar",
+    "ja richtig", "gut danke", "okay danke", "ja super", "ja perfekt",
+}
+
+
+def is_backchannel(text: str) -> bool:
+    """True when the utterance only acknowledges, rather than asking something.
+
+    Deliberately conservative: anything with a question mark, a longer sentence,
+    or a single word outside the list is treated as real speech.  A false
+    positive would ignore a real question, which is far worse than a false
+    negative.
+    """
+    cleaned = re.sub(r"[^\w\säöüß]", " ", text.lower(), flags=re.UNICODE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned or "?" in text:
+        return False
+    if cleaned in BACKCHANNEL_PHRASES:
+        return True
+    words = cleaned.split()
+    if len(words) > 3:
+        return False
+    return all(word in BACKCHANNEL_WORDS for word in words)

@@ -87,6 +87,8 @@ class FakeRtp:
     """Stands in for RtpSession: records what would go on the wire."""
 
     def __init__(self) -> None:
+        self.on_sent = None
+        self.dtmf_sent: List[str] = []
         self.queue: List[np.ndarray] = []
         self.sent_samples = 0
         self.cleared = 0
@@ -111,16 +113,30 @@ class FakeRtp:
         self.queue.clear()
         self.cleared += 1
 
+    def send_dtmf(self, digits: str) -> int:
+        self.dtmf_sent.append(digits)
+        return len(digits) * 200
+
+    def dtmf_pending(self) -> bool:
+        return False
+
     def start_draining(self, speed: float = 1.0) -> None:
+        """Mimic the real 20 ms send tick, including the on_sent callback."""
+
         async def drain():
             while True:
                 await asyncio.sleep(0.02 / speed)
+                frame = None
                 if self.queue:
                     head = self.queue[0]
                     if head.size <= 160:
+                        frame = head
                         self.queue.pop(0)
                     else:
+                        frame = head[:160]
                         self.queue[0] = head[160:]
+                if self.on_sent is not None:
+                    self.on_sent(frame)
 
         self._drain_task = asyncio.ensure_future(drain())
 
@@ -136,6 +152,7 @@ class FakeUa:
     def __init__(self) -> None:
         self.rang = False
         self.transfers: List[str] = []
+        self.transfer_methods: List[object] = []
         self.hangups: List[str] = []
         self.transfer_should_fail = False
         self.call: Optional[Call] = None
@@ -143,8 +160,9 @@ class FakeUa:
     def ring(self, call) -> None:
         self.rang = True
 
-    async def answer(self, call, *, on_audio, on_dtmf=None):
+    async def answer(self, call, *, on_audio, on_dtmf=None, on_sent=None):
         call.rtp = FakeRtp()
+        call.rtp.on_sent = on_sent
         call.state = CallState.ANSWERED
         call.started_at = time.monotonic()
         self.on_audio = on_audio
@@ -152,13 +170,17 @@ class FakeUa:
         self.call = call
         return call.rtp
 
-    async def transfer(self, call, number, timeout=6.0):
-        from helpdesk.sip.ua import TransferError
+    async def transfer(self, call, number, *, method=None, timeout=6.0,
+                       feature_code="##", dtmf_delay_ms=700, dtmf_terminator="",
+                       dtmf_settle_s=4.0):
+        from helpdesk.sip.ua import TransferError, TransferMethod
 
+        self.transfer_methods.append(method)
         if self.transfer_should_fail:
             raise TransferError("rejected by fake pbx")
         self.transfers.append(number)
         call.state = CallState.TRANSFERRING
+        return "dtmf" if method is TransferMethod.DTMF else "refer"
 
     async def hangup(self, call, reason=""):
         self.hangups.append(reason)
@@ -407,6 +429,145 @@ async def test_dtmf_zero_transfers():
     return True
 
 
+async def test_backchannel_resumes_instead_of_restarting():
+    """A caller saying "mhm" must not restart the answer."""
+    session, call, ua, synth, llm = await build_session(
+        ["Erzaehl mir von euren Zeiten", "mhm"],
+        ["Der Support ist montags bis freitags erreichbar. Von acht bis achtzehn Uhr. "
+         "Ausserhalb nehmen wir Stoerungen auf. Die bearbeiten wir am naechsten Werktag.",
+         "Sollte nicht aufgerufen werden."],
+        tts_delay=0.0,
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    # Real-time playout: synthesis outruns transmission, so several sentences sit
+    # in the queue unheard -- which is the situation this feature exists for.
+    call.rtp.start_draining(speed=1)
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: len(synth.spoken) >= 2, 5, "reply under way")
+    await wait_until(lambda: session._queued_samples > session._sent_samples + 8000,
+                     5, "audio buffered ahead of the caller")
+
+    requests_before = len(llm.requests)
+    # Interrupt mid-answer, then say only "mhm"
+    for frame in speech(20):
+        session._on_audio(frame)
+        await asyncio.sleep(0.001)
+    await wait_until(lambda: session._interrupted_remainder != "", 3, "remainder remembered")
+    remainder = session._interrupted_remainder
+    print(f"PASS remembered {len(remainder)} chars the caller had not heard yet")
+
+    spoken_before = len(synth.spoken)
+    await feed(session, silence(10) + speech(20) + silence(15), drain_first=False)
+    await wait_until(lambda: len(synth.spoken) > spoken_before, 6, "resume")
+
+    assert len(llm.requests) == requests_before, "model was asked again for a backchannel"
+    resumed = " ".join(synth.spoken[spoken_before:])
+    assert resumed.strip(), "nothing was resumed"
+    print(f"PASS backchannel resumed the answer without asking the model again")
+    print(f"     resumed with: {resumed[:70]!r}")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_real_interruption_does_ask_again():
+    """A real question during the answer must reach the model."""
+    session, call, ua, synth, llm = await build_session(
+        ["Erzaehl mir alles", "Was kostet ein neuer Laptop?"],
+        ["Ein sehr langer erster Teil der Antwort. Mit mehreren Saetzen darin. "
+         "Und noch einem dritten Satz. Und einem vierten.",
+         "Dazu kann ich nichts sagen."],
+        tts_delay=0.02,
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: len(synth.spoken) >= 2, 5, "reply under way")
+
+    requests_before = len(llm.requests)
+    for frame in speech(20):
+        session._on_audio(frame)
+        await asyncio.sleep(0.001)
+    await wait_until(lambda: session.call.rtp.cleared > 0, 3, "interrupted")
+    await feed(session, silence(10) + speech(30) + silence(15), drain_first=False)
+    await wait_until(lambda: len(llm.requests) > requests_before, 6, "model asked again")
+    print("PASS a real question after an interruption does reach the model")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_echo_does_not_interrupt():
+    """The agent's own voice echoing back must not cut it off."""
+    session, call, ua, synth, llm = await build_session(
+        ["Eine Frage"], ["Eine recht lange Antwort die weiterlaufen soll. Mit zweitem Satz. Und drittem."],
+        tts_delay=0.02,
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: call.rtp.sent_samples > 0 and synth.spoken, 5, "speaking")
+
+    cleared_before = call.rtp.cleared
+    rng = np.random.default_rng(7)
+    # Drive transmit and receive on the same tick, as the real pacing loop does:
+    # we send a loud frame, an attenuated copy of it comes back ~18 dB down,
+    # which is what a speakerphone echo looks like.
+    call.rtp.stop_draining()
+    call.rtp.on_sent = session._on_sent
+    for _ in range(80):
+        session._on_sent((rng.normal(0, 6000, 160)).astype(np.int16))
+        session._on_audio((rng.normal(0, 700, 160)).astype(np.int16))
+        await asyncio.sleep(0.002)
+    await asyncio.sleep(0.2)
+    assert call.rtp.cleared == cleared_before, "echo was treated as barge-in"
+    assert session.barge_in.echo_rejected > 0, "echo guard never fired"
+    print(f"PASS echo at -18 dB did not interrupt "
+          f"({session.barge_in.echo_rejected} frames rejected as echo)")
+
+    # A caller talking at a comparable level must still get through
+    cleared_before = call.rtp.cleared
+    for _ in range(40):
+        session._on_sent((rng.normal(0, 6000, 160)).astype(np.int16))
+        session._on_audio((rng.normal(0, 5500, 160)).astype(np.int16))
+        await asyncio.sleep(0.002)
+    await asyncio.sleep(0.2)
+    assert call.rtp.cleared > cleared_before, "a real caller at speech level was blocked"
+    print("PASS a caller at comparable level still interrupts")
+
+    session._done.set()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_transfer_method_passed_through():
+    """The configured transfer method must reach the user agent."""
+    from helpdesk.sip.ua import TransferMethod
+
+    config = build_config(transfer_method="dtmf", transfer_dtmf_feature_code="*2")
+    session, call, ua, synth, llm = await build_session(
+        ["Ich will einen Menschen"], ["Ich verbinde. [WEITERLEITEN]"], config=config
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: ua.transfers, 5, "transfer")
+    assert ua.transfer_methods == [TransferMethod.DTMF], ua.transfer_methods
+    assert session.transfer_feature_code == "*2"
+    assert session.metrics.end_reason == "transferred-dtmf", session.metrics.end_reason
+    print("PASS transfer_method=dtmf reaches the UA with the configured feature code")
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
 async def main() -> int:
     tests = [
         ("greeting + full turn", test_greeting_and_turn),
@@ -416,6 +577,10 @@ async def main() -> int:
         ("unrecognised speech", test_unrecognised_speech_prompts_then_transfers),
         ("silence watchdog", test_silence_watchdog),
         ("dtmf 0", test_dtmf_zero_transfers),
+        ("backchannel resumes", test_backchannel_resumes_instead_of_restarting),
+        ("real interruption asks again", test_real_interruption_does_ask_again),
+        ("echo does not interrupt", test_echo_does_not_interrupt),
+        ("transfer method passthrough", test_transfer_method_passed_through),
     ]
     failed = 0
     for name, test in tests:

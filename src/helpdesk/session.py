@@ -25,7 +25,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -33,10 +33,10 @@ from .audio.codec import resample
 from .audio.vad import BargeInDetector, Endpointer, EndpointerConfig, VadEvent, build_vad
 from .llm.agent import Action, HelpdeskAgent
 from .metrics import CallMetrics, TurnMetrics
-from .sip.ua import Call, SipUserAgent, TransferError
+from .sip.ua import Call, SipUserAgent, TransferError, TransferMethod
 from .tts.base import Synthesizer
 from .tts.registry import PhraseCache
-from .tts.text import SentenceStreamer
+from .tts.text import SentenceStreamer, is_backchannel
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +94,16 @@ class CallSession:
         dialog = config["dialog"]
         self.dialog = dialog
         self.transfer_number = str(dialog.get("transfer_number") or "")
+        try:
+            self.transfer_method = TransferMethod(str(dialog.get("transfer_method", "auto")).lower())
+        except ValueError:
+            log.warning(
+                "unknown transfer_method %r, using auto", dialog.get("transfer_method")
+            )
+            self.transfer_method = TransferMethod.AUTO
+        self.transfer_feature_code = str(dialog.get("transfer_dtmf_feature_code", "##"))
+        self.transfer_dtmf_delay_ms = int(dialog.get("transfer_dtmf_delay_ms", 700))
+        self.transfer_dtmf_terminator = str(dialog.get("transfer_dtmf_terminator", "") or "")
         self.max_misunderstood = int(dialog.get("max_misunderstood", 2))
         self.silence_prompt_after_ms = int(dialog.get("silence_prompt_after_ms", 7000))
         self.silence_hangup_after_ms = int(dialog.get("silence_hangup_after_ms", 20000))
@@ -118,7 +128,11 @@ class CallSession:
             build_vad(vad_config.get("backend", "auto"), 3),
             min_speech_ms=int(vad_config.get("barge_in_ms", 260)),
             frame_ms=20,
+            echo_guard=bool(vad_config.get("echo_guard", True)),
+            echo_attenuation_db=float(vad_config.get("echo_attenuation_db", 12.0)),
+            echo_correlation=float(vad_config.get("echo_correlation", 0.72)),
         )
+        self.resume_on_backchannel = bool(vad_config.get("resume_on_backchannel", True))
 
         tts_config = config["tts"]
         self._streamer_kwargs = dict(
@@ -142,6 +156,14 @@ class CallSession:
         self._last_caller_audio = time.monotonic()
         self._silence_prompted = False
         self._pending_action = Action.NONE
+        #: (sentence, cumulative sample index at which it finishes) for the reply
+        #: being spoken, against samples actually transmitted.  Audio sitting in
+        #: the playout queue has not been heard yet, so "generated" is the wrong
+        #: measure -- only what went on the wire counts.
+        self._speech_plan: List[Tuple[str, int]] = []
+        self._queued_samples = 0
+        self._sent_samples = 0
+        self._interrupted_remainder = ""
         self.metrics = CallMetrics(call_id=call.call_id, caller=call.caller_number)
         self.transcript: List[dict] = []
 
@@ -157,6 +179,18 @@ class CallSession:
                 self._frames.get_nowait()
             with contextlib.suppress(asyncio.QueueFull):
                 self._frames.put_nowait(pcm)
+
+    def _on_sent(self, frame: Optional[np.ndarray]) -> None:
+        """Per-tick notification of what went out.
+
+        Feeds the echo guard and counts transmitted speech, which is what decides
+        how much of an interrupted answer the caller actually heard.
+        """
+        if frame is None:
+            self.barge_in.note_silence()
+        else:
+            self.barge_in.note_sent(frame)
+            self._sent_samples += int(frame.size)
 
     def _on_dtmf(self, digit: str) -> None:
         log.info("DTMF %s on %s", digit, self.call.call_id)
@@ -189,7 +223,18 @@ class CallSession:
     async def _play(self, audio: np.ndarray) -> None:
         if self.call.rtp is None or audio.size == 0:
             return
+        self._queued_samples += int(audio.size)
         self.call.rtp.enqueue(audio)
+
+    def _reset_speech_plan(self) -> None:
+        self._speech_plan = []
+        self._queued_samples = 0
+        self._sent_samples = 0
+
+    def _unheard_text(self) -> str:
+        """The part of the current reply that was never transmitted."""
+        unheard = [text for text, end_sample in self._speech_plan if end_sample > self._sent_samples]
+        return " ".join(unheard).strip()
 
     async def _speak_cached(self, text: str) -> int:
         """Play a pre-rendered phrase; returns the audio duration in ms."""
@@ -229,6 +274,24 @@ class CallSession:
             self.call.rtp.clear_playout()
         self._speaking = False
 
+    async def _resume_speaking(self, text: str) -> None:
+        """Speak text that an interruption cut short, without asking the model."""
+        self._cancel_speech.clear()
+        self._speaking = True
+        self.barge_in.reset()
+        self._reset_speech_plan()
+        streamer = SentenceStreamer(**self._streamer_kwargs)
+        sentences = list(streamer.feed(text + " ")) + streamer.flush()
+        for sentence in sentences:
+            if self._cancel_speech.is_set():
+                return
+            async for piece in self.synthesizer.stream(sentence, cancel=self._cancel_speech):
+                if self._cancel_speech.is_set():
+                    return
+                await self._play(resample(piece.pcm, piece.sample_rate, TELEPHONY_RATE))
+            self._speech_plan.append((sentence, self._queued_samples))
+        self._log_turn("assistant", text)
+
     async def _speak_reply(self, user_text: str, metrics: TurnMetrics) -> None:
         """Stream the model's answer and synthesise it clause by clause."""
         self._cancel_speech.clear()
@@ -237,6 +300,8 @@ class CallSession:
         streamer = SentenceStreamer(**self._streamer_kwargs)
         first_audio_logged = False
         turn_started = time.monotonic()
+        self._reset_speech_plan()
+        self._interrupted_remainder = ""
 
         retrieval_started = time.monotonic()
         context, _ = await self.agent.retrieve(user_text)
@@ -254,6 +319,8 @@ class CallSession:
                         metrics.response_ms = int((time.monotonic() - metrics.speech_end_at) * 1000)
                     first_audio_logged = True
                 await self._play(audio)
+            # Record where this sentence ends in the outgoing stream.
+            self._speech_plan.append((chunk, self._queued_samples))
 
         try:
             async for delta in self.agent.respond_stream(user_text, context=context):
@@ -377,10 +444,19 @@ class CallSession:
         # the instant the PBX moves the leg.
         await self._wait_for_playout(150)
         try:
-            await self.ua.transfer(self.call, self.transfer_number)
+            used = await self.ua.transfer(
+                self.call,
+                self.transfer_number,
+                method=self.transfer_method,
+                feature_code=self.transfer_feature_code,
+                dtmf_delay_ms=self.transfer_dtmf_delay_ms,
+                dtmf_terminator=self.transfer_dtmf_terminator,
+            )
             self.metrics.transferred = True
-            self.metrics.end_reason = "transferred"
-            log.info("transferred %s to %s", self.call.call_id, self.transfer_number)
+            self.metrics.end_reason = f"transferred-{used}"
+            log.info(
+                "transferred %s to %s via %s", self.call.call_id, self.transfer_number, used
+            )
             self._done.set()
         except TransferError as exc:
             log.error("transfer failed: %s", exc)
@@ -419,7 +495,9 @@ class CallSession:
         if delay:
             await asyncio.sleep(delay / 1000)
 
-        await self.ua.answer(call, on_audio=self._on_audio, on_dtmf=self._on_dtmf)
+        await self.ua.answer(
+            call, on_audio=self._on_audio, on_dtmf=self._on_dtmf, on_sent=self._on_sent
+        )
 
         self.agent.reset()
         greeting_ms = await self._speak_cached(self.texts.greeting)
@@ -494,6 +572,12 @@ class CallSession:
             self._turn_task = asyncio.ensure_future(self._run_turn())
 
     def _cancel_turn(self) -> None:
+        # Remember what the caller never got to hear, so a backchannel ("mhm")
+        # can resume instead of restarting the answer.
+        remainder = self._unheard_text()
+        if remainder:
+            self._interrupted_remainder = remainder
+            log.debug("interrupted with %d chars unheard", len(remainder))
         self._interrupt_speech()
         if self._turn_task is not None and not self._turn_task.done():
             self._turn_task.cancel()
@@ -533,6 +617,22 @@ class CallSession:
 
         self.agent.misunderstood = 0
         self._log_turn("caller", transcript.text)
+
+        if (
+            self.resume_on_backchannel
+            and self._interrupted_remainder
+            and is_backchannel(transcript.text)
+        ):
+            # The caller was only acknowledging; carry on where we left off
+            # rather than treating "mhm" as a new question.
+            remainder = self._interrupted_remainder
+            self._interrupted_remainder = ""
+            log.info("backchannel %r: resuming the interrupted answer", transcript.text)
+            await self._resume_speaking(remainder)
+            self.metrics.add(metrics)
+            await self._wait_for_playout()
+            return
+        self._interrupted_remainder = ""
 
         if self.texts.thinking and metrics.utterance_ms > 2500:
             # Only for long questions, where retrieval and generation will take

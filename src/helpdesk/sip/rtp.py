@@ -108,6 +108,47 @@ class DtmfCollector:
         return table[event] if event < len(table) else None
 
 
+class DtmfSender:
+    """RFC 2833 telephone-event generator.
+
+    A digit is a run of packets sharing one timestamp with a growing duration,
+    then three end packets with the E bit set.  Asterisk's feature-code detector
+    wants a realistic tone length, so the defaults match what a desk phone sends.
+    """
+
+    TABLE = {
+        **{str(d): d for d in range(10)},
+        "*": 10,
+        "#": 11,
+        "A": 12,
+        "B": 13,
+        "C": 14,
+        "D": 15,
+    }
+
+    def __init__(self, payload_type: int, *, tone_ms: int = 120, gap_ms: int = 80, volume: int = 10) -> None:
+        self.payload_type = payload_type
+        self.tone_ms = tone_ms
+        self.gap_ms = gap_ms
+        self.volume = volume
+
+    @classmethod
+    def supports(cls, digit: str) -> bool:
+        return digit.upper() in cls.TABLE
+
+    def events(self, digit: str, frame_ms: int, samples_per_frame: int):
+        """Yield ``(payload, is_end)`` for one digit."""
+        event = self.TABLE[digit.upper()]
+        packets = max(1, self.tone_ms // frame_ms)
+        for index in range(1, packets + 1):
+            duration = index * samples_per_frame
+            yield struct.pack("!BBH", event, self.volume & 0x3F, duration & 0xFFFF), False
+        duration = packets * samples_per_frame
+        # Three end packets, as the RFC recommends, against packet loss.
+        for _ in range(3):
+            yield struct.pack("!BBH", event, 0x80 | (self.volume & 0x3F), duration & 0xFFFF), True
+
+
 class RtpSession(asyncio.DatagramProtocol):
     """One bidirectional RTP stream.
 
@@ -122,6 +163,7 @@ class RtpSession(asyncio.DatagramProtocol):
         *,
         on_audio: Callable[[np.ndarray], None],
         on_dtmf: Optional[Callable[[str], None]] = None,
+        on_sent: Optional[Callable[[Optional[np.ndarray]], None]] = None,
         dtmf_payload: Optional[int] = 101,
         frame_ms: int = 20,
         sample_rate: int = 8000,
@@ -132,6 +174,9 @@ class RtpSession(asyncio.DatagramProtocol):
         self.dtmf_payload = dtmf_payload
         self.on_audio = on_audio
         self.on_dtmf = on_dtmf
+        #: called once per send tick with the frame transmitted, or None for idle
+        #: fill.  The echo guard needs this aligned to the 20 ms grid.
+        self.on_sent = on_sent
         self.frame_ms = frame_ms
         self.sample_rate = sample_rate
         self.samples_per_frame = sample_rate * frame_ms // 1000
@@ -154,6 +199,14 @@ class RtpSession(asyncio.DatagramProtocol):
         self._dtmf = DtmfCollector()
 
         self._silence_payload = bytes([silence_byte(encoding)]) * self.samples_per_frame
+        self._dtmf_sender = (
+            DtmfSender(dtmf_payload) if dtmf_payload is not None else None
+        )
+        #: queued outbound DTMF actions, drained by the send tick ahead of audio.
+        #: Each entry is ("tone", payload) for an event packet, ("end", payload)
+        #: for the last packet of a digit, or ("gap", b"") for inter-digit silence.
+        self._dtmf_out: Deque[Tuple[str, bytes]] = deque()
+        self._dtmf_timestamp: Optional[int] = None
 
         self.packets_sent = 0
         self.packets_received = 0
@@ -272,7 +325,19 @@ class RtpSession(asyncio.DatagramProtocol):
     def _emit_one(self) -> None:
         if self.transport is None or self.remote is None:
             return
+
+        # DTMF takes priority: a feature code interleaved with speech would not
+        # be recognised by the PBX.
+        if self._dtmf_out:
+            self._emit_dtmf()
+            return
+
         frame = self._take_frame()
+        if self.on_sent is not None:
+            try:
+                self.on_sent(frame)
+            except Exception:  # pragma: no cover - never break pacing
+                log.debug("on_sent callback failed", exc_info=True)
         if frame is None:
             if not self.send_silence:
                 return
@@ -283,17 +348,79 @@ class RtpSession(asyncio.DatagramProtocol):
             marker = self._marker_pending
             self._marker_pending = False
 
+        self._send_payload(payload, self.payload_type, advance=True, marker=marker)
+
+    def _send_payload(
+        self,
+        payload: bytes,
+        payload_type: int,
+        *,
+        advance: bool,
+        timestamp: Optional[int] = None,
+        marker: bool = False,
+    ) -> None:
+        if self.transport is None or self.remote is None:
+            return
         header = RtpHeader(
-            payload_type=self.payload_type,
+            payload_type=payload_type,
             sequence=self._seq,
-            timestamp=self._timestamp,
+            timestamp=self._timestamp if timestamp is None else timestamp,
             ssrc=self._ssrc,
             marker=marker,
         )
         self.transport.sendto(header.encode() + payload, self.remote)
         self._seq = (self._seq + 1) & 0xFFFF
-        self._timestamp = (self._timestamp + self.samples_per_frame) & 0xFFFFFFFF
+        if advance:
+            self._timestamp = (self._timestamp + self.samples_per_frame) & 0xFFFFFFFF
         self.packets_sent += 1
+
+    def _emit_dtmf(self) -> None:
+        kind, payload = self._dtmf_out.popleft()
+
+        if kind == "gap":
+            # Silence between digits, on the audio payload type and advancing the
+            # clock, so the stream stays continuous for the far end.
+            self._send_payload(self._silence_payload, self.payload_type, advance=True)
+            return
+
+        # Every packet of one digit repeats the timestamp the digit started at.
+        if self._dtmf_timestamp is None:
+            self._dtmf_timestamp = self._timestamp
+        self._send_payload(
+            payload,
+            self._dtmf_sender.payload_type,
+            advance=False,
+            timestamp=self._dtmf_timestamp,
+        )
+        if kind == "end" and not (self._dtmf_out and self._dtmf_out[0][0] == "end"):
+            # Digit complete: move the clock past the tone we just sent.
+            self._timestamp = (self._timestamp + self.samples_per_frame) & 0xFFFFFFFF
+            self._dtmf_timestamp = None
+
+    def send_dtmf(self, digits: str) -> int:
+        """Queue DTMF digits for transmission.  Returns the ms they will take."""
+        if self._dtmf_sender is None:
+            log.warning("cannot send DTMF: the peer offered no telephone-event payload")
+            return 0
+        sender = self._dtmf_sender
+        gap_frames = max(1, sender.gap_ms // self.frame_ms)
+        queued = 0
+        for digit in digits:
+            if digit in (" ", "-", ","):
+                continue
+            if not DtmfSender.supports(digit):
+                log.warning("skipping unsendable DTMF digit %r", digit)
+                continue
+            for payload, is_end in sender.events(digit, self.frame_ms, self.samples_per_frame):
+                self._dtmf_out.append(("end" if is_end else "tone", payload))
+            for _ in range(gap_frames):
+                self._dtmf_out.append(("gap", b""))
+            queued += sender.tone_ms + gap_frames * self.frame_ms
+        log.info("queued DTMF %r (%d ms)", digits, queued)
+        return queued
+
+    def dtmf_pending(self) -> bool:
+        return bool(self._dtmf_out)
 
     def start(self) -> None:
         if self._sender_task is None:

@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import enum
 import logging
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Deque, Optional
 
 import numpy as np
 
@@ -224,26 +225,92 @@ class Endpointer:
 
 
 class BargeInDetector:
-    """Separate, deliberately stricter detector used while the bot is speaking.
+    """Stricter detector used while the agent is speaking.
 
-    A single voiced frame must not cut the bot off -- line echo and the caller's
-    own "mhm" would make the agent unusable.  Requiring a sustained run plus a
-    level margin keeps false triggers rare.
+    Two false triggers would make the agent unusable, and they need different
+    defences:
+
+    * A single voiced frame must not cut it off, so a sustained run is required.
+    * Line echo of the agent's own voice must not count as the caller speaking.
+      On a digital trunk there is none, but a caller on speakerphone or a mobile
+      sends plenty back.  Since we know exactly what we just transmitted, echo is
+      recognisable: it tracks the transmitted envelope and arrives attenuated.
+      Frames that correlate with recent output, or that are far quieter than what
+      we are sending, are discarded.
     """
 
-    def __init__(self, vad, min_speech_ms: int = 260, frame_ms: int = 20, level_margin_db: float = 6.0) -> None:
+    def __init__(
+        self,
+        vad,
+        min_speech_ms: int = 260,
+        frame_ms: int = 20,
+        level_margin_db: float = 6.0,
+        *,
+        echo_guard: bool = True,
+        echo_attenuation_db: float = 12.0,
+        echo_correlation: float = 0.72,
+        echo_history_frames: int = 25,
+    ) -> None:
         self.vad = vad
         self.frames_needed = max(1, int(round(min_speech_ms / frame_ms)))
         self.level_margin_db = level_margin_db
         self.run = 0
-        self.reference_db = -45.0
+        self.noise_floor_db = -45.0
+
+        self.echo_guard = echo_guard
+        self.echo_attenuation_db = echo_attenuation_db
+        self.echo_correlation = echo_correlation
+        #: recent transmitted levels, newest last, for envelope comparison
+        self._sent_db: Deque[float] = deque(maxlen=max(4, echo_history_frames))
+        self._heard_db: Deque[float] = deque(maxlen=max(4, echo_history_frames))
+        self.echo_rejected = 0
 
     def reset(self) -> None:
         self.run = 0
+        self._heard_db.clear()
+
+    def note_sent(self, pcm: np.ndarray) -> None:
+        """Record the level of audio handed to the transmitter."""
+        if not self.echo_guard or pcm.size == 0:
+            return
+        self._sent_db.append(rms_dbfs(pcm))
+
+    def note_silence(self) -> None:
+        if self.echo_guard:
+            self._sent_db.append(-120.0)
+
+    def _looks_like_echo(self, level_db: float) -> bool:
+        if not self.echo_guard or not self._sent_db:
+            return False
+        recent = [v for v in self._sent_db if v > -100.0]
+        if not recent:
+            return False
+        sent_peak = max(recent)
+        # Echo returns attenuated: anything well below what we are transmitting,
+        # while we transmit, is far more likely echo than a talking caller.
+        if level_db < sent_peak - self.echo_attenuation_db:
+            return True
+        if len(self._heard_db) >= 6 and len(recent) >= 6:
+            heard = np.array(list(self._heard_db)[-6:], dtype=np.float64)
+            sent = np.array(recent[-6:], dtype=np.float64)
+            if heard.std() > 1.0 and sent.std() > 1.0:
+                correlation = float(np.corrcoef(heard, sent)[0, 1])
+                if correlation >= self.echo_correlation:
+                    return True
+        return False
 
     def push(self, frame: np.ndarray, sample_rate: int = 16000) -> bool:
-        loud_enough = rms_dbfs(frame) > self.reference_db + self.level_margin_db
-        if loud_enough and self.vad.is_speech(frame, sample_rate):
+        level_db = rms_dbfs(frame)
+        self._heard_db.append(level_db)
+
+        if level_db < self.noise_floor_db + self.level_margin_db:
+            self.run = max(0, self.run - 1)
+            return False
+        if self._looks_like_echo(level_db):
+            self.echo_rejected += 1
+            self.run = max(0, self.run - 1)
+            return False
+        if self.vad.is_speech(frame, sample_rate):
             self.run += 1
         else:
             self.run = max(0, self.run - 1)

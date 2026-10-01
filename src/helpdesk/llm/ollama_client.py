@@ -28,12 +28,17 @@ class OllamaClient:
         keep_alive: str = "-1",
         timeout: float = 60.0,
         options: Optional[Dict] = None,
+        think: Optional[bool] = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.keep_alive = keep_alive
         self.timeout = timeout
         self.options = options or {}
+        #: Reasoning models (Qwen3, DeepSeek-R1 and friends) emit a thinking block
+        #: before answering.  On a phone call that is dead air, so it is off by
+        #: default; None leaves the model's own default alone.
+        self.think = think
         self._session = None
 
     async def _get_session(self):
@@ -61,9 +66,23 @@ class OllamaClient:
             "keep_alive": self.keep_alive,
             "options": {**self.options, **(options or {})},
         }
+        if self.think is not None:
+            payload["think"] = self.think
         started = time.monotonic()
         first = True
         async with session.post(f"{self.base_url}/api/chat", json=payload) as response:
+            if response.status == 400 and "think" in payload:
+                body = await response.text()
+                if "think" in body.lower():
+                    # This build or model does not accept the flag; drop it and
+                    # remember, so we do not pay the round trip again.
+                    log.info("ollama rejected think=%s, disabling the flag", payload["think"])
+                    self.think = None
+                    payload.pop("think")
+                    async for delta in self.chat_stream(messages, options=options, model=model):
+                        yield delta
+                    return
+                raise OllamaError(f"ollama 400: {body[:300]}")
             if response.status != 200:
                 body = await response.text()
                 raise OllamaError(f"ollama {response.status}: {body[:300]}")
@@ -77,7 +96,10 @@ class OllamaClient:
                     continue
                 if "error" in event:
                     raise OllamaError(str(event["error"]))
-                delta = (event.get("message") or {}).get("content") or ""
+                message = event.get("message") or {}
+                # A thinking model may still return reasoning in its own field;
+                # it is never spoken.
+                delta = message.get("content") or ""
                 if delta:
                     if first:
                         log.debug("ollama first token after %d ms", int((time.monotonic() - started) * 1000))

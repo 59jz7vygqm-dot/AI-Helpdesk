@@ -1,49 +1,60 @@
 # AI Helpdesk — SIP-Telefonagent mit lokaler KI
 
 Registriert sich als Nebenstelle an einer PBX, nimmt Anrufe an und führt ein
-Gespräch: Spracherkennung, Antwort aus einer eigenen Wissensdatenbank, Sprachausgabe.
-Wenn er nicht weiterhelfen kann, sagt er das und leitet per SIP REFER auf eine
-andere Rufnummer weiter.
+Gespräch: Spracherkennung, Antwort aus einer eigenen Wissensdatenbank,
+Sprachausgabe. Man kann ihn jederzeit unterbrechen. Wenn er nicht weiterhelfen
+kann, sagt er das und leitet auf eine andere Rufnummer weiter — per SIP REFER,
+und falls die PBX das verbietet, über deren eigenen Feature-Code.
 
 Alles läuft lokal. Kein Cloud-Dienst, kein Audio verlässt den Server.
 
 ```
-Anrufer ──SIP/RTP── PBX ──SIP/RTP── Container ─┬─ faster-whisper  (GPU)
-                                               ├─ Ollama          (GPU)
-                                               ├─ Piper/Chatterbox (CPU/GPU)
-                                               └─ Wissens-DB      (Markdown)
+Anrufer ──SIP/RTP── PBX ──SIP/RTP── Container ─┬─ faster-whisper (GPU)   Erkennung
+                                               ├─ Ollama         (GPU)   Antwort
+                                               ├─ Qwen3-TTS      (GPU)   Stimme
+                                               └─ Wissens-DB  (Markdown) Inhalte
 ```
 
 ---
 
-## Die zwei wichtigsten Punkte zuerst — ehrlich
+## Die wichtigsten Punkte zuerst — ehrlich
 
-**Latenz: ja, das geht.** Gemessen am Pfad, nicht geschätzt: die Pause zwischen
-„Anrufer hört auf zu reden" und „Agent fängt an zu reden" liegt mit der
-Standardkonfiguration bei **600–750 ms**. Das ist schneller als die meisten
-menschlichen Hotline-Mitarbeiter reagieren. Erreicht wird das mit drei Tricks:
-Erkennung startet **vor** Ende der Sprechpause, die Antwort wird satzweise
-synthetisiert während das Modell noch generiert, und feste Sätze wie die
-Begrüßung sind vorgerendert.
+**Unterbrechen: ja, jederzeit.** Sobald der Anrufer zu reden anfängt, bricht der
+Agent mitten im Wort ab — die Wiedergabe wird verworfen, die Synthese gestoppt
+und zugehört. Zwei Dinge machen das erst benutzbar: sein **eigenes Echo** löst es
+nicht aus (er vergleicht, was reinkommt, mit dem, was er gerade gesendet hat), und
+ein eingeworfenes **„mhm" oder „alles klar" lässt ihn weiterreden** statt die
+Antwort von vorn zu beginnen — er merkt sich, was der Anrufer noch nicht gehört
+hat. Beides ist getestet.
 
-**Klingt wie ein Mensch: nur mit Kompromiss.** Das muss ich klar sagen, statt es
-schönzureden:
+**Latenz: ja, das geht.** Die Pause zwischen „Anrufer hört auf zu reden" und
+„Agent fängt an zu reden" liegt bei **etwa 800 ms bis 1,0 s** mit der guten
+Stimme, und bei **600–750 ms**, wenn du auf Piper umstellst. Beides ist am
+Telefon unauffällig. Erreicht wird das mit drei Tricks: die Erkennung startet
+**vor** Ende der Sprechpause, die Antwort wird satzweise synthetisiert während das
+Modell noch generiert, und feste Sätze wie die Begrüßung sind vorgerendert. Wo die
+Zeit hingeht, steht pro Antwort im Log — du musst nicht raten.
+
+**Stimme: Qwen3-TTS ist der Standard.** Apache-2.0 (also kommerziell nutzbar),
+Deutsch, Stimmklonen aus wenigen Sekunden Material. Das ist derzeit das beste,
+was lokal für Deutsch zu haben ist.
 
 | Stimme | Zeit bis erstes Audio | VRAM | Klingt |
 |---|---|---|---|
-| **Piper** (Standard) | ~30–60 ms | 0 (CPU) | sauber verständlich, aber hörbar synthetisch |
-| **Chatterbox** | ~300–500 ms | ~3 GB | nah an einem Menschen, Stimme klonbar |
+| **Qwen3-TTS 1.7B** (Standard) | ~150–400 ms | ~8 GB | nah an einem Menschen, klonbar |
+| Qwen3-TTS 0.6B | ~100–250 ms | ~4 GB | gut, etwas weniger Prosodie |
+| Chatterbox | ~300–500 ms | ~3 GB | ähnlich gut, MIT, 23 Sprachen |
+| Piper | ~30–60 ms | 0 (CPU) | hörbar synthetisch — Fallback zur Fehlersuche |
 
-Es gibt derzeit kein lokales deutsches TTS, das gleichzeitig menschlich klingt
-*und* unter 100 ms liefert. Du musst wählen. Mein Vorschlag: **mit Piper
-anfangen**, den ganzen Ablauf zum Laufen bringen, dann `TTS_BACKEND=chatterbox`
-setzen und selbst entscheiden, ob die ~400 ms mehr den Qualitätssprung wert sind.
-Ein Backend-Wechsel ist eine Zeile, der restliche Code bleibt gleich.
+Der Preis für die Qualität ist Latenz: ~800 ms bis 1,0 s statt ~600 ms mit Piper.
+Für ein Telefongespräch ist beides im Rahmen; eine Sekunde Pause ist weniger als
+die meisten Menschen am Telefon brauchen.
 
-Was mehr zur Menschlichkeit beiträgt als die reine Stimmqualität — und hier schon
-eingebaut ist: dass man den Agenten **unterbrechen** kann, dass er **kurz**
-antwortet statt Absätze vorzulesen, dass er **nicht mitten im Satz abgeschnitten**
-wird, und dass er Abkürzungen ausspricht statt zu buchstabieren.
+Was zur Menschlichkeit genauso viel beiträgt wie die Stimme — und alles eingebaut
+ist: dass man ihn **jederzeit unterbrechen** kann, dass sein eigenes Echo das
+**nicht fälschlich** auslöst, dass ein eingeworfenes „mhm" ihn **weiterreden**
+lässt statt neu anzufangen, dass er **kurz** antwortet, und dass er Abkürzungen
+ausspricht statt zu buchstabieren.
 
 ---
 
@@ -54,11 +65,11 @@ Gemessen ab dem Moment, in dem der Anrufer aufhört zu sprechen:
 | Stufe | Dauer | Anmerkung |
 |---|---|---|
 | Sprechpause abwarten | **420 ms** | der größte Posten, einstellbar |
-| Spracherkennung | 0–80 ms | läuft spekulativ schon vorher an |
+| Spracherkennung | 0–100 ms | läuft spekulativ schon vorher an |
 | Wissenssuche | ~15 ms | numpy-Skalarprodukt, keine Datenbank |
 | LLM bis erstes Token | 120–200 ms | 7B Q4 auf einer L4 |
-| TTS bis erstes Audio | 30–60 ms | Piper; Chatterbox 300–500 ms |
-| **Summe** | **~600–750 ms** | mit Chatterbox ~1,0 s |
+| TTS bis erstes Audio | 150–400 ms | Qwen3-TTS 1.7B; Piper 30–60 ms |
+| **Summe** | **~800 ms – 1,0 s** | mit Piper statt Qwen3 ~600–750 ms |
 
 Die eine Stellschraube, die wirklich zählt, ist `vad.end_silence_ms`. Runter auf
 300 ms fühlt sich spürbar flotter an, aber der Agent fängt an, Leute zu
@@ -73,33 +84,34 @@ Das `*` heißt: die spekulative Erkennung hat gegriffen, die ASR-Zeit war gratis
 
 ---
 
-## VRAM auf 12 GB
+## VRAM: drei fertige Profile
 
-Deine L4 hat 24 GB, frei sind ~12 GB. Das reicht, aber nicht für jede Kombination:
+In `config/profiles/` liegen drei vollständige Konfigurationen. Eine davon über
+`config/config.yaml` kopieren:
 
-| Komponente | VRAM | |
-|---|---|---|
-| faster-whisper `large-v3-turbo` (int8) | 1,6 GB | |
-| Ollama `qwen2.5:7b-instruct-q4_K_M` | ~5,2 GB | inkl. KV-Cache bei 4k Kontext |
-| Embeddings `bge-m3` (Ollama) | ~1,2 GB | |
-| Piper | 0 GB | läuft auf der CPU |
-| **Summe Standard** | **~8,0 GB** | passt mit Puffer |
+| Profil | VRAM | Stimme | LLM | Wofür |
+|---|---|---|---|---|
+| `12gb-shared.yaml` | ~11 GB | Qwen3-TTS 0.6B | 7B | GPU wird geteilt, ~12 GB frei |
+| **`16gb-quality.yaml`** | **~15 GB** | **Qwen3-TTS 1.7B** | **7B** | **meine Empfehlung** |
+| `22gb-max.yaml` | ~20 GB | Qwen3-TTS 1.7B | 14B | L4 komplett frei |
 
-Mit Chatterbox statt Piper kommen ~3 GB dazu → ~11 GB. Das ist zu knapp. Zwei Wege:
-
-```yaml
-# Variante A: Embeddings auf die CPU (spart 1,2 GB, kostet ~20 ms pro Suche)
-knowledge:
-  embeddings:
-    backend: fastembed
-    model: intfloat/multilingual-e5-small
-    query_prefix: "query: "
-    document_prefix: "passage: "
-
-# Variante B: kleineres Sprachmodell (spart ~3 GB, antwortet schneller)
-llm:
-  model: "qwen2.5:3b-instruct-q4_K_M"
+```bash
+cp config/profiles/16gb-quality.yaml config/config.yaml
 ```
+
+**Warum ich bei 16 GB das 7B-Modell behalte, obwohl Platz für 14B wäre:** Am
+Telefon hört der Anrufer die Stimme, nicht die Modellgröße. Die Antworten sind
+kurz und stehen ohnehin in der Wissensdatenbank — ein 14B formuliert sie selten
+besser, braucht aber 150–250 ms länger, und das bei *jeder* Antwort. Das VRAM ist
+in der 1.7B-Stimme deutlich besser angelegt. Wenn du das Gegenteil hören willst:
+`22gb-max.yaml` nehmen und vergleichen, das ist der ganze Aufwand.
+
+Wichtig: `keep_alive: "-1"` lässt das Sprachmodell dauerhaft im VRAM. Ohne das
+lädt Ollama es nach ein paar Minuten Ruhe aus — und der nächste Anrufer wartet
+zwanzig Sekunden.
+
+Und: `think: false`. Modelle wie `qwen3:14b` „denken" sonst erst mehrere Sekunden
+still nach, bevor das erste Wort kommt. Am Telefon ist das totes Schweigen.
 
 Wichtig: `keep_alive: "-1"` in der Config lässt das Modell dauerhaft im VRAM.
 Ohne das lädt Ollama es nach ein paar Minuten Ruhe aus — und der nächste Anrufer
@@ -109,6 +121,26 @@ wartet 20 Sekunden.
 die ehrliche Zahl: zwei parallele Anrufe würden sich die GPU teilen und wären
 beide langsam. Weitere Anrufe werden mit `486 Busy Here` abgewiesen, die PBX
 kann sie dann auf die Weiterleitungsnummer schicken.
+
+### Eigene Stimme verwenden
+
+Qwen3-TTS klont aus wenigen Sekunden Material. Aufnahme (ruhig, ohne Störgeräusche)
+ablegen und den gesprochenen Text exakt eintragen:
+
+```yaml
+tts:
+  qwen3:
+    mode: clone
+    reference_audio: /models/piper/meine-stimme.wav
+    reference_text: "Guten Tag, Sie sprechen mit dem Service der Beispiel GmbH."
+```
+
+Die eingebauten Stimmen listet `scripts/list_qwen_voices.py` auf; der Name gehört
+dann nach `tts.qwen3.speaker`. Alternativ `mode: design` und die Stimme in Worten
+beschreiben (`instruct: "ruhig, freundlich, sachlich"`).
+
+Rechtlich, weil es praktisch relevant ist: eine fremde Stimme zu klonen braucht
+deren Einverständnis.
 
 ---
 
@@ -123,19 +155,16 @@ nvidia-smi -L                    # UUID der L4 notieren
 curl -s localhost:11434/api/tags # Ollama erreichbar?
 ```
 
-### 2. Modelle holen
+### 2. Profil wählen und Modelle holen
 
 ```bash
 git clone <dieses-repo> && cd AI-Helpdesk
-./scripts/download_models.sh     # Piper-Stimme + Ollama-Modelle
+cp config/profiles/16gb-quality.yaml config/config.yaml
+./scripts/download_models.sh     # Ollama-Modelle + Piper als Fallback-Stimme
 ```
 
-Andere deutsche Stimme (`thorsten` ist männlich und neutral, `eva_k` und
-`kerstin` sind weiblich):
-
-```bash
-VOICE=de_DE-eva_k-x_low ./scripts/download_models.sh
-```
+Qwen3-TTS lädt beim ersten Start selbst von Hugging Face (~5 GB, landet im
+`/models`-Volume, also einmalig).
 
 ### 3. Zugangsdaten
 
@@ -164,9 +193,12 @@ docker compose logs -f
 Erwartete Ausgabe:
 
 ```
-loading ASR model large-v3-turbo (cuda, int8_float16)
+loading ASR model large-v3-turbo (cuda, float16)
 ASR model ready in 4.2s
-warmup complete in 18.3s
+loading Qwen3-TTS Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice (cuda:0, bfloat16)
+Qwen3-TTS ready in 21.7s
+knowledge base built: 14 chunks from /app/knowledge in 2.1s
+warmup complete in 41.6s
 registered as 900, refreshing in 225s
 helpdesk ready: extension 900 on 192.168.1.10, transfers go to 200
 ```
@@ -177,10 +209,12 @@ Dann die Nummer anrufen.
 
 ## Vor dem ersten Anruf testen
 
-Der nützlichste Befehl im Repo — das ganze Gehirn ohne Telefon:
+Der nützlichste Befehl im Repo — das ganze Gehirn ohne Telefon, und der Weg, die
+Stimme zu beurteilen, bevor jemand anruft:
 
 ```bash
 docker compose exec helpdesk python3 /app/scripts/try_pipeline.py "Mein Drucker zeigt E-512"
+docker compose exec helpdesk python3 /app/scripts/list_qwen_voices.py
 ```
 
 Zeigt die Antwort, die Zeiten jeder Stufe, welche Wissensquellen getroffen
@@ -202,6 +236,61 @@ Fehlerfall und die Stille-Überwachung.
 
 ---
 
+## Managed Asterisk: was du beim Anbieter klären musst
+
+Dass die PBX fremdverwaltet ist, ist kein Hindernis — der Agent ist aus Sicht der
+PBX eine völlig normale Nebenstelle, genau wie ein Tischtelefon. Aber **ein**
+Punkt hängt vom Anbieter ab, und den solltest du vorher klären statt beim ersten
+Anruf zu rätseln.
+
+**Die eine wichtige Frage:** Erlaubt die Nebenstelle SIP REFER?
+Konkret: steht bei dem Endpoint `allow_transfer = no` (PJSIP) bzw.
+`allowtransfer=no` (chan_sip)? Falls ja, lehnt die PBX jeden Weiterleitungs-
+versuch per REFER ab — genau wie bei einem Tischtelefon, dessen Transfer-Taste
+dann auch nicht funktioniert.
+
+Deshalb gibt es zwei Wege, und standardmäßig probiert der Agent beide:
+
+```yaml
+dialog:
+  transfer_method: auto             # REFER zuerst, bei Ablehnung Feature-Code
+  transfer_dtmf_feature_code: "##"  # Asterisks blindxfer aus features.conf
+```
+
+1. **SIP REFER** — der saubere Weg. Die PBX übernimmt den Anruf und wählt das
+   Ziel nach ihrem Wählplan, also funktioniert Nebenstelle, Warteschlange oder
+   externe Nummer gleichermaßen.
+2. **DTMF-Feature-Code** — der Fallback. Der Agent wählt mitten im Gespräch die
+   Transfer-Tastenfolge aus Asterisks `features.conf` und danach die Zielnummer,
+   exakt wie ein Mensch, der „##200" drückt. Das funktioniert auch bei
+   `allow_transfer = no`, weil hier die PBX die Weiterleitung macht und das
+   Endgerät nichts signalisiert.
+
+**Was du den Anbieter fragen solltest** — drei Sätze reichen:
+
+> 1. Ist für die Nebenstelle `allow_transfer` aktiviert (SIP REFER erlaubt)?
+>    Wenn nein: bitte für diese eine Nebenstelle aktivieren.
+> 2. Falls nicht möglich: welche DTMF-Sequenz ist als `blindxfer` in
+>    `features.conf` konfiguriert, und ist der Dial mit der Option `t` gesetzt,
+>    sodass die angerufene Seite weiterleiten darf?
+> 3. Welche Codecs sind für die Nebenstelle erlaubt? G.711 (`alaw`) genügt.
+
+Für den Feature-Code gibt es keinen verlässlichen Standardwert: Asterisk pur
+verwendet üblicherweise `#1`, FreePBX häufig `##`. Deshalb rät das Programm
+nicht, sondern nimmt den konfigurierten Wert. Wenn der Fallback greift, aber die
+PBX nicht reagiert, steht das als klarer Fehler im Log:
+
+```
+REFER refused (403 Forbidden); falling back to the DTMF feature code
+PBX did not act on the feature code '##' within 4.0s
+(wrong code, or in-call transfers are disabled for this extension)
+```
+
+Falls beides nicht geht, bleibt als Notlösung: den Anbieter bitten, eine
+Rufumleitung bei Besetzt auf die Zielnummer zu legen, und `max_concurrent_calls`
+so zu nutzen, dass weitere Anrufe mit `486 Busy Here` abgewiesen werden. Das ist
+hässlich, aber es verliert keinen Anrufer.
+
 ## Wie die Weiterleitung funktioniert
 
 Der Agent leitet weiter, wenn:
@@ -212,14 +301,9 @@ Der Agent leitet weiter, wenn:
 - zweimal nichts verstanden wurde (`dialog.max_misunderstood`),
 - oder der Anrufer die **0** drückt.
 
-Technisch passiert das mit **SIP REFER** an die PBX. Das akzeptieren Asterisk,
-FreePBX, FreeSWITCH und 3CX von einer registrierten Nebenstelle, und das Ziel
-darf eine Nebenstelle, eine Warteschlange oder eine externe Nummer sein — die
-PBX entscheidet über ihren Wählplan.
-
 Der Agent sagt vorher einen Satz an und wartet, bis der zu Ende gespielt ist.
-Scheitert das REFER, entschuldigt er sich und legt auf, statt den Anrufer in
-Stille hängen zu lassen. Die Zielrufnummer nennt er nie.
+Scheitert die Weiterleitung auf beiden Wegen, entschuldigt er sich und legt auf,
+statt den Anrufer in Stille hängen zu lassen. Die Zielrufnummer nennt er nie.
 
 Das Modell signalisiert die Weiterleitung mit dem Marker `[WEITERLEITEN]` in
 seinem Text. Der wird aus dem Audio herausgefiltert, auch wenn er mitten im
@@ -246,26 +330,15 @@ Was man am ehesten anfasst:
 |---|---|
 | `vad.end_silence_ms` | Reaktionszeit vs. Leute-ins-Wort-fallen |
 | `vad.barge_in_ms` | wie leicht man den Agenten unterbrechen kann |
+| `vad.echo_attenuation_db` | runter, wenn Echo den Agenten unterbricht |
+| `dialog.transfer_method` | `auto`, `refer` oder `dtmf` (siehe oben) |
+| `tts.qwen3.model_id` | 1.7B (besser) oder 0.6B (sparsamer) |
 | `dialog.greeting` | Begrüßung (wird vorgerendert) |
 | `dialog.transfer_number` | wohin unbeantwortbare Anrufe gehen |
 | `dialog.max_sentences` | Antwortlänge; 2–3 ist telefontauglich |
 | `knowledge.min_score` | zu niedrig → erfindet; zu hoch → leitet zu oft weiter |
 | `asr.initial_prompt` | eigene Produktnamen/Fehlercodes der Erkennung beibringen |
 | `sip.trace` | jede SIP-Nachricht loggen — das Erste bei Registrierungsproblemen |
-
-### Eigene Stimme klonen
-
-Mit Chatterbox: 10–20 Sekunden klare Sprachaufnahme als WAV ablegen und
-
-```yaml
-tts:
-  backend: chatterbox
-  chatterbox:
-    reference_audio: /models/piper/meine-stimme.wav
-```
-
-Rechtlicher Hinweis, nicht als Belehrung gemeint, sondern weil es praktisch
-relevant ist: eine fremde Stimme zu klonen braucht deren Einverständnis.
 
 ---
 
@@ -293,6 +366,18 @@ dauert, ist das Modell zu groß oder es wird in den RAM ausgelagert.
 **Er fällt mir ins Wort** — `vad.end_silence_ms` hoch (500–600).
 **Er reagiert zu träge** — denselben Wert runter (300–350).
 
+**Er unterbricht sich selbst** — das wäre Echo, das als Sprache des Anrufers
+durchgeht. `vad.echo_attenuation_db` von 12 auf 8 senken (strenger) oder
+`vad.barge_in_ms` hoch. Im Log steht, wie viele Frames der Echo-Schutz abgewiesen
+hat.
+
+**Man kann ihn nicht unterbrechen** — umgekehrt: `vad.barge_in_ms` runter
+(180–220) und `vad.echo_attenuation_db` hoch (16–20), oder zum Prüfen
+`vad.echo_guard: false`.
+
+**Weiterleitung scheitert** — siehe den Abschnitt zur managed Asterisk oben. Das
+Log nennt immer, welcher Weg versucht wurde und warum er scheiterte.
+
 **Er erfindet Dinge** — `knowledge.min_score` hoch und prüfen, ob die
 Wissensdatenbank zum Thema überhaupt etwas enthält. Dann leitet er lieber weiter,
 statt zu improvisieren. `temperature` in `llm.options` runter hilft zusätzlich.
@@ -307,16 +392,32 @@ Produktnamen und Fehlercodes füllen; das lenkt die Erkennung.
 Weil das für die Einschätzung wichtig ist:
 
 **Verifiziert** (automatisiert, ohne Hardware): Signalisierung gegen eine
-simulierte PBX inklusive Digest-Auth, Codec-Aushandlung und REFER-Weiterleitung;
-G.711-Kodierung gegen den Standard; 20,1 ms gemessener Sendetakt; Audiointegrität
-über den echten Sendepfad (Korrelation 0,9999); Gesprächsablauf mit Begrüßung,
-Unterbrechung, Weiterleitung samt Fehlerfall, Stille-Überwachung und DTMF.
+simulierte PBX inklusive Digest-Auth, Codec-Aushandlung, REFER-Weiterleitung und
+**dem DTMF-Fallback, wenn die PBX REFER mit 403 ablehnt**; G.711-Kodierung gegen
+den Standard; DTMF-Senden nach RFC 2833 (Paketstruktur und Rückdekodierung);
+20,0 ms gemessener Sendetakt; Audiointegrität über den echten Sendepfad
+(Korrelation 0,9999); auf Gesprächsebene Begrüßung, Unterbrechung,
+**Echo-Abwehr bei −18 dB**, **Fortsetzen nach „mhm"**, Weiterleitung samt
+Fehlerfall, Stille-Überwachung und DTMF-Null.
 
 **Noch nicht verifiziert**, weil mir dafür die Hardware fehlt: der Lauf gegen
-eine echte PBX, die tatsächliche Latenz auf deiner L4, und wie Chatterbox auf
-Deutsch klingt. Die Zahlen für die Modellstufen oben sind veröffentlichte
-Benchmarks für diese Hardwareklasse, keine Messung auf deinem Server. Der erste
-echte Anruf ist der eigentliche Test — `sip.trace: true` dabei anlassen.
+eine echte PBX, die tatsächliche Latenz auf deiner L4, und wie Qwen3-TTS auf
+Deutsch klingt. Die Zahlen für die Modellstufen sind veröffentlichte Benchmarks
+für diese Hardwareklasse, keine Messung auf deinem Server.
+
+Eine Einschränkung, die ich benennen muss: **das Qwen3-TTS-Backend ist gegen die
+dokumentierte API geschrieben, nicht gegen eine laufende Installation.** Das
+Modell ist von Januar 2026 und ich konnte es hier nicht ausführen. Der Code geht
+defensiv mit Abweichungen um (er sucht die Streaming-Methode zur Laufzeit, kommt
+mit beiden `from_pretrained`-Signaturen zurecht und normalisiert verschiedene
+Rückgabeformen), und wenn etwas nicht passt, nennt die Fehlermeldung den
+Ausweg. Trotzdem: **beim ersten Start damit rechnen, dass `tts.qwen3.language`
+(`"German"` vs. `"de"`) oder der Speaker-Name angepasst werden muss.** Zum
+Prüfen reicht `scripts/try_pipeline.py` — ohne einen einzigen Anruf. Und
+`TTS_BACKEND=piper` funktioniert als Rückfallebene garantiert.
+
+Der erste echte Anruf ist der eigentliche Test — `sip.trace: true` dabei
+anlassen.
 
 Der SIP-Stack ist selbst geschrieben, statt pjsua2 zu binden. Grund: die
 Audioframes bleiben in Python, ohne Sprachwechsel im 20-ms-Takt, und das Image
@@ -334,11 +435,11 @@ src/helpdesk/
   audio/        G.711-Codec, Resampling, Sprachaktivität und Endpunkterkennung
   asr/          faster-whisper mit Halluzinationsfilter
   llm/          Ollama-Streaming und der Dialogagent
-  tts/          Piper, Chatterbox, OpenAI-kompatibel, Satzaufteilung, Phrasencache
+  tts/          Qwen3-TTS, Piper, Chatterbox, OpenAI-kompatibel, Satzaufteilung
   kb/           Markdown-Chunking, Embeddings, hybride Suche
   session.py    Gesprächsablauf: der Latenzpfad
   app.py        Verdrahtung und Start
-config/         Konfiguration, kommentiert
+config/         Konfiguration, kommentiert, plus drei VRAM-Profile
 knowledge/      Wissensdatenbank (Markdown)
 scripts/        Modelldownload, Pipeline-Test, Tests, Healthcheck
 tests/          simulierte PBX, Session-, Verdrahtungs- und Unit-Tests

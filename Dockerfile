@@ -1,5 +1,11 @@
-# CUDA 12.4 runtime with cuDNN 9, which is what CTranslate2 >= 4.5 links against.
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# CUDA 12.8 with cuDNN 9: 12.8 is what the Qwen3-TTS torch wheels target, and
+# cuDNN 9 is what CTranslate2 >= 4.5 (faster-whisper) links against.
+ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+FROM ${CUDA_IMAGE}
+
+# quality = Qwen3-TTS on the GPU (needs torch, adds ~5 GB to the image)
+# lite    = Piper only, CPU, much smaller image and faster build
+ARG TTS_PROFILE=quality
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -18,15 +24,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
+COPY requirements.txt requirements-quality.txt /app/
 RUN python3 -m pip install --upgrade pip setuptools wheel \
-    && python3 -m pip install -r /app/requirements.txt
+    && python3 -m pip install -r /app/requirements.txt \
+    && if [ "$TTS_PROFILE" = "quality" ]; then \
+         python3 -m pip install torch torchaudio \
+           --index-url https://download.pytorch.org/whl/cu128 \
+         && python3 -m pip install -r /app/requirements-quality.txt ; \
+       fi
 
 COPY src /app/src
 COPY config /app/config
 COPY knowledge /app/knowledge
 COPY scripts /app/scripts
-RUN chmod +x /app/scripts/*.sh || true
+RUN chmod +x /app/scripts/*.sh /app/scripts/*.py || true
 
 # Model weights and the phrase/knowledge caches live on a volume so a rebuild
 # does not re-download several gigabytes.
@@ -37,7 +48,8 @@ VOLUME ["/models"]
 EXPOSE 5060/udp
 EXPOSE 16000-16200/udp
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+# The agent touches a heartbeat file while its SIP registration is alive.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
     CMD python3 /app/scripts/healthcheck.py || exit 1
 
 ENTRYPOINT ["python3", "-m", "helpdesk"]

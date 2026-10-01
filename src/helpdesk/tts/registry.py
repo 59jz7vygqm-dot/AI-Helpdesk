@@ -38,6 +38,25 @@ def build_synthesizer(config: dict) -> Synthesizer:
             use_cuda=bool(piper.get("use_cuda", False)),
         )
 
+    if backend in ("qwen3", "qwen3-tts", "qwen"):
+        from .qwen3_tts import Qwen3TtsSynthesizer
+
+        q = config.get("qwen3", {}) or {}
+        return Qwen3TtsSynthesizer(
+            model_id=q.get("model_id", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"),
+            device=q.get("device", "cuda:0"),
+            dtype=q.get("dtype", "bfloat16"),
+            language=q.get("language", "German"),
+            mode=q.get("mode", "custom"),
+            speaker=q.get("speaker", "") or "",
+            instruct=q.get("instruct", "") or "",
+            reference_audio=q.get("reference_audio", "") or "",
+            reference_text=q.get("reference_text", "") or "",
+            attn_implementation=q.get("attn_implementation", "") or "",
+            sample_rate=int(q.get("sample_rate", 24000)),
+            streaming=bool(q.get("streaming", True)),
+        )
+
     if backend == "chatterbox":
         from .chatterbox_tts import ChatterboxSynthesizer
 
@@ -68,7 +87,10 @@ def build_synthesizer(config: dict) -> Synthesizer:
             extra_body=oa.get("extra_body") or {},
         )
 
-    raise ValueError(f"unknown TTS backend: {backend!r}")
+    raise ValueError(
+        f"unknown TTS backend: {backend!r} "
+        "(expected piper, qwen3, chatterbox or openai)"
+    )
 
 
 class PhraseCache:

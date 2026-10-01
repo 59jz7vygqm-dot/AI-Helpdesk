@@ -7,6 +7,7 @@ Drives the real code path: REGISTER with a digest challenge, inbound INVITE,
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import socket
@@ -47,6 +48,8 @@ class FakePbx(asyncio.DatagramProtocol):
         self.rtp_sock = None
         self.rtp_from_ua = 0
         self.bye_seen = asyncio.Event()
+        self.refuse_refer = False
+        self.refer_refused = asyncio.Event()
 
     def connection_made(self, transport):
         self.transport = transport
@@ -62,6 +65,11 @@ class FakePbx(asyncio.DatagramProtocol):
 
     # -- requests from the UA
     def _handle_request(self, msg, addr):
+        if msg.method == "REFER" and self.refuse_refer:
+            resp = sipmsg.build_response(msg, 403, "Forbidden", to_tag=self.from_tag)
+            self.transport.sendto(resp.encode(), addr)
+            self.refer_refused.set()
+            return
         if msg.method == "REGISTER":
             self.register_count += 1
             if not msg.get("authorization"):
@@ -134,6 +142,16 @@ class FakePbx(asyncio.DatagramProtocol):
         inv.body = sdp
         self.transport.sendto(inv.encode(), addr)
 
+    def send_bye_to(self, addr):
+        b = sipmsg.SipMessage(is_request=True, method="BYE", uri="sip:900@127.0.0.1")
+        b.set("Via", f"SIP/2.0/UDP 127.0.0.1:{self.port};branch={sipmsg.new_branch()}")
+        b.set("From", f"<sip:4915112345@fake-pbx>;tag={self.from_tag}")
+        b.set("To", f"<sip:900@fake-pbx>;tag={self.answer_to_tag}")
+        b.set("Call-ID", self.call_id)
+        b.set("CSeq", "3 BYE")
+        b.set("Content-Length", "0")
+        self.transport.sendto(b.encode(), addr)
+
     def send_notify(self, addr, body="SIP/2.0 200 OK"):
         n = sipmsg.SipMessage(is_request=True, method="NOTIFY", uri="sip:900@127.0.0.1")
         n.set("Via", f"SIP/2.0/UDP 127.0.0.1:{self.port};branch={sipmsg.new_branch()}")
@@ -160,6 +178,106 @@ async def wait_for(predicate, timeout=5.0, what="condition"):
             return
         await asyncio.sleep(0.02)
     raise AssertionError(f"timed out waiting for {what}")
+
+
+async def dtmf_transfer_case() -> None:
+    """REFER refused -> the agent must fall back to the DTMF feature code.
+
+    This is the case that matters on a managed Asterisk, where the provider may
+    have allow_transfer=no on the endpoint.
+    """
+    loop = asyncio.get_running_loop()
+    pbx_port = free_port()
+    ua_port = free_port()
+
+    pbx = FakePbx()
+    pbx.refuse_refer = True
+    await loop.create_datagram_endpoint(lambda: pbx, local_addr=("127.0.0.1", pbx_port))
+
+    account = SipAccount(
+        username="900", password="secret", domain="fake-pbx",
+        server_host="127.0.0.1", server_port=pbx_port,
+        bind_host="127.0.0.1", bind_port=ua_port, advertise_host="127.0.0.1",
+        rtp_port_range=(21000, 21100), codec_preference=["PCMA"],
+    )
+
+    answered = asyncio.Event()
+    call_box: dict = {}
+
+    async def on_call(call: Call):
+        call_box["call"] = call
+        await agent.answer(call, on_audio=lambda p: None)
+        answered.set()
+
+    agent = SipUserAgent(account, on_call)
+    await agent.start()
+    await asyncio.wait_for(pbx.authorized_register.wait(), 5)
+    await wait_for(lambda: agent.registered, 5, "registered")
+
+    pbx.send_invite(("127.0.0.1", ua_port))
+    await asyncio.wait_for(answered.wait(), 5)
+    await asyncio.wait_for(pbx.got_200_for_invite.wait(), 5)
+    call = call_box["call"]
+
+    answer_sdp = pbx.invite_answer.body.decode()
+    ua_rtp_port = int(re.search(r"m=audio (\d+)", answer_sdp).group(1))
+
+    # Listen on the RTP port the PBX advertised, and decode DTMF like Asterisk
+    rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rtp_sock.bind(("127.0.0.1", pbx.rtp_port))
+    rtp_sock.setblocking(False)
+    # Make the UA send to us
+    rtp_sock.sendto(
+        RtpHeader(payload_type=8, sequence=1, timestamp=0, ssrc=99).encode() + b"\xd5" * 160,
+        ("127.0.0.1", ua_rtp_port),
+    )
+    await asyncio.sleep(0.1)
+
+    from helpdesk.sip.rtp import DtmfCollector
+    from helpdesk.sip.ua import TransferMethod
+
+    collected: list = []
+    collector = DtmfCollector()
+
+    async def sniff():
+        while True:
+            await asyncio.sleep(0.01)
+            try:
+                while True:
+                    data, _ = rtp_sock.recvfrom(2048)
+                    parsed = RtpHeader.parse(data)
+                    if not parsed:
+                        continue
+                    hdr, payload = parsed
+                    if hdr.payload_type == 101:
+                        digit = collector.feed(hdr.timestamp, payload)
+                        if digit:
+                            collected.append(digit)
+                            # Asterisk tears down our leg once the transfer is
+                            # accepted; emulate that after the full sequence.
+                            if "".join(collected) == "##4930999888":
+                                pbx.send_bye_to(("127.0.0.1", ua_port))
+            except BlockingIOError:
+                pass
+
+    sniffer = asyncio.ensure_future(sniff())
+    try:
+        used = await agent.transfer(
+            call, "4930999888", method=TransferMethod.AUTO,
+            feature_code="##", dtmf_delay_ms=200, dtmf_settle_s=4.0,
+        )
+    finally:
+        sniffer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sniffer
+        rtp_sock.close()
+
+    assert pbx.refer_refused.is_set(), "REFER was never attempted"
+    print("PASS auto transfer: REFER tried first and refused with 403")
+    assert used == "dtmf", f"fell back to {used!r}"
+    assert "".join(collected) == "##4930999888", f"DTMF on the wire: {''.join(collected)!r}"
+    print(f"PASS fell back to DTMF feature code, PBX received {''.join(collected)!r}")
+    await agent.stop()
 
 
 async def main() -> int:
@@ -323,6 +441,9 @@ async def main() -> int:
     rtp_sock.close()
     await agent.stop()
     print("PASS shutdown (de-register sent)")
+
+    print("\n--- DTMF fallback (managed PBX with REFER disabled) ---")
+    await dtmf_transfer_case()
     return 0
 
 

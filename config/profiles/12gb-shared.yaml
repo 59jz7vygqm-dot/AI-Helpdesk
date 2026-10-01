@@ -1,3 +1,17 @@
+# Profile: ~11 GB of VRAM.
+#
+# For when the GPU is shared and roughly 12 GB is free. Keeps the good voice by
+# using the smaller Qwen3-TTS, drops ASR to int8 and moves embeddings to the CPU.
+#
+#   ASR  large-v3-turbo int8     ~1.6 GB
+#   LLM  qwen2.5:7b Q4           ~5.2 GB
+#   TTS  Qwen3-TTS 0.6B          ~4.0 GB
+#   KB   fastembed (CPU)             0
+#   ----------------------------------
+#                                ~10.8 GB
+#
+# Copy over config/config.yaml to use it.
+
 # AI Helpdesk configuration.
 #
 # Every scalar here can be overridden from the environment as
@@ -36,7 +50,7 @@ asr:
   model: large-v3-turbo            # ~1.6 GB at int8; distil-large-v3 is smaller
   device: cuda
   device_index: 0
-  compute_type: float16            # float16 for quality; int8_float16 halves VRAM
+  compute_type: int8_float16       # halves VRAM at a small accuracy cost
   language: de                     # pin it; autodetect costs time and can flip
   beam_size: 1                     # greedy: beam search doubles latency
   download_root: /models/whisper
@@ -75,7 +89,7 @@ tts:
 
   qwen3:
     # 1.7B sounds clearly better than 0.6B; drop to 0.6B only if VRAM is tight.
-    model_id: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+    model_id: Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
     device: cuda:0
     dtype: bfloat16
     language: German             # the model wants a language name, not a code
@@ -133,11 +147,11 @@ knowledge:
   dense_weight: 0.72                # rest is BM25; lower it if exact terms matter
   min_score: 0.28                   # below this, the agent says it cannot help
   embeddings:
-    backend: ollama                 # or: fastembed (CPU, no VRAM)
-    model: bge-m3                   # multilingual, strong on German
+    backend: fastembed              # CPU: keeps all VRAM for ASR/LLM/TTS
+    model: intfloat/multilingual-e5-small
     batch_size: 16
-    query_prefix: ""                # for e5 models use "query: "
-    document_prefix: ""             # for e5 models use "passage: "
+    query_prefix: "query: "
+    document_prefix: "passage: "
     cache_dir: /models/fastembed
     threads: 4
 

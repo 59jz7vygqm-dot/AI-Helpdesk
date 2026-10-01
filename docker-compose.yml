@@ -1,6 +1,10 @@
 services:
   helpdesk:
-    build: .
+    build:
+      context: .
+      args:
+        # quality = Qwen3-TTS on the GPU (default). lite = Piper only, small image.
+        TTS_PROFILE: "${TTS_PROFILE:-quality}"
     image: ai-helpdesk:latest
     container_name: ai-helpdesk
     restart: unless-stopped
@@ -28,7 +32,14 @@ services:
       # --- models ------------------------------------------------------
       HELPDESK_LLM_BASE_URL: "${OLLAMA_URL:-http://127.0.0.1:11434}"
       HELPDESK_LLM_MODEL: "${LLM_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
-      HELPDESK_TTS_BACKEND: "${TTS_BACKEND:-piper}"
+      HELPDESK_TTS_BACKEND: "${TTS_BACKEND:-qwen3}"
+      HELPDESK_TTS_QWEN3_MODEL_ID: "${TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+      HELPDESK_TTS_QWEN3_SPEAKER: "${TTS_SPEAKER:-}"
+
+      # How the agent hands calls over. auto = try SIP REFER, fall back to the
+      # PBX feature code (needed when a managed PBX has allow_transfer=no).
+      HELPDESK_DIALOG_TRANSFER_METHOD: "${TRANSFER_METHOD:-auto}"
+      HELPDESK_DIALOG_TRANSFER_DTMF_FEATURE_CODE: "${TRANSFER_FEATURE_CODE:-##}"
 
       NVIDIA_VISIBLE_DEVICES: "${GPU_UUID:-all}"
 
@@ -50,7 +61,7 @@ services:
               capabilities: [gpu]
 
     # faster-whisper and the TTS backends use shared memory for dataloading.
-    shm_size: "1gb"
+    shm_size: "2gb"
 
     logging:
       driver: json-file

@@ -44,6 +44,16 @@ class TransferError(RuntimeError):
     pass
 
 
+class TransferMethod(enum.Enum):
+    #: SIP REFER: the clean way, but a managed PBX may have allow_transfer=no
+    REFER = "refer"
+    #: DTMF feature code (Asterisk features.conf blindxfer), which survives
+    #: allow_transfer=no because the PBX, not the endpoint, performs the transfer
+    DTMF = "dtmf"
+    #: try REFER, fall back to DTMF when the PBX refuses it
+    AUTO = "auto"
+
+
 @dataclass
 class SipAccount:
     username: str
@@ -447,6 +457,7 @@ class SipUserAgent:
         *,
         on_audio: Callable[[np.ndarray], None],
         on_dtmf: Optional[Callable[[str], None]] = None,
+        on_sent: Optional[Callable[[Optional[np.ndarray]], None]] = None,
     ) -> RtpSession:
         """Send 200 OK with our SDP answer and start media."""
         if call.state not in (CallState.INCOMING, CallState.RINGING):
@@ -472,6 +483,7 @@ class SipUserAgent:
             payload_type,
             on_audio=on_audio,
             on_dtmf=on_dtmf,
+            on_sent=on_sent,
             dtmf_payload=dtmf_payload,
         )
         local_port = await open_rtp_session(
@@ -678,12 +690,116 @@ class SipUserAgent:
         log.info("hung up %s (%s) after %.1fs", call.call_id, reason or "no reason", call.duration)
         await self._finish_call(call, reason or "local-bye")
 
-    async def transfer(self, call: Call, target_number: str, timeout: float = 6.0) -> None:
-        """Blind transfer via REFER.
+    async def transfer(
+        self,
+        call: Call,
+        target_number: str,
+        *,
+        method: TransferMethod = TransferMethod.AUTO,
+        timeout: float = 6.0,
+        feature_code: str = "##",
+        dtmf_delay_ms: int = 700,
+        dtmf_terminator: str = "",
+        dtmf_settle_s: float = 4.0,
+    ) -> str:
+        """Hand the call to a human.  Returns the method that succeeded.
 
-        REFER is what Asterisk/FreePBX/FreeSWITCH/3CX all accept from a
-        registered extension, and it hands the call to the PBX dialplan so the
-        target can be an extension, a queue, or an external number.
+        On a PBX you administer yourself, REFER is the right answer.  On a
+        managed Asterisk it may be switched off per endpoint
+        (``allow_transfer=no``), and then only the PBX's own feature code works --
+        hence AUTO, which tries REFER first and falls back.
+        """
+        if method is TransferMethod.REFER:
+            await self.transfer_refer(call, target_number, timeout=timeout)
+            return "refer"
+        if method is TransferMethod.DTMF:
+            await self.transfer_dtmf(
+                call, target_number, feature_code=feature_code,
+                delay_ms=dtmf_delay_ms, terminator=dtmf_terminator, settle_s=dtmf_settle_s,
+            )
+            return "dtmf"
+
+        try:
+            await self.transfer_refer(call, target_number, timeout=timeout)
+            return "refer"
+        except TransferError as exc:
+            log.warning("REFER refused (%s); falling back to the DTMF feature code", exc)
+            await self.transfer_dtmf(
+                call, target_number, feature_code=feature_code,
+                delay_ms=dtmf_delay_ms, terminator=dtmf_terminator, settle_s=dtmf_settle_s,
+            )
+            return "dtmf"
+
+    async def transfer_dtmf(
+        self,
+        call: Call,
+        target_number: str,
+        *,
+        feature_code: str = "##",
+        delay_ms: int = 700,
+        terminator: str = "",
+        settle_s: float = 4.0,
+    ) -> None:
+        """Blind transfer by dialling the PBX's in-call feature code.
+
+        Asterisk watches the audio stream for the ``blindxfer`` sequence from
+        features.conf, then collects the destination as further DTMF.  The
+        endpoint never signals a transfer, so this works where REFER is denied --
+        provided the channel was dialled with the ``t`` option, which FreePBX
+        sets for extensions by default.
+        """
+        if not call.active:
+            raise TransferError(f"call is {call.state.value}, cannot transfer")
+        if call.rtp is None:
+            raise TransferError("no media; cannot send DTMF")
+        if call.rtp.dtmf_payload is None:
+            raise TransferError(
+                "the PBX offered no telephone-event payload, so DTMF transfer is "
+                "impossible; ask the provider to enable REFER instead"
+            )
+
+        call.state = CallState.TRANSFERRING
+        rtp = call.rtp
+        # Anything still queued would be interleaved with the tones.
+        rtp.clear_playout()
+
+        log.info(
+            "DTMF transfer of %s: feature code %r then %s",
+            call.call_id, feature_code, target_number,
+        )
+        rtp.send_dtmf(feature_code)
+        await self._await_dtmf(rtp, timeout=3.0)
+        # Give the PBX time to recognise the code and start collecting digits.
+        await asyncio.sleep(delay_ms / 1000)
+        rtp.send_dtmf(target_number + terminator)
+        await self._await_dtmf(rtp, timeout=6.0)
+
+        # A successful blind transfer ends our leg: wait for the BYE.  If it
+        # never comes the feature code was not accepted and the caller is still
+        # on the line with us.
+        deadline = time.monotonic() + settle_s
+        while time.monotonic() < deadline:
+            if call.state is CallState.ENDED or call.call_id not in self.calls:
+                log.info("DTMF transfer of %s accepted by the PBX", call.call_id)
+                return
+            await asyncio.sleep(0.1)
+        call.state = CallState.ANSWERED
+        raise TransferError(
+            f"PBX did not act on the feature code {feature_code!r} within {settle_s}s "
+            "(wrong code, or in-call transfers are disabled for this extension)"
+        )
+
+    @staticmethod
+    async def _await_dtmf(rtp: RtpSession, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while rtp.dtmf_pending() and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+
+    async def transfer_refer(self, call: Call, target_number: str, timeout: float = 6.0) -> None:
+        """Blind transfer via SIP REFER.
+
+        REFER hands the call to the PBX dialplan, so the target can be an
+        extension, a queue, or an external number.
         """
         if not call.active:
             raise TransferError(f"call is {call.state.value}, cannot transfer")
