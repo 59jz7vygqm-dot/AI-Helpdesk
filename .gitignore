@@ -1,0 +1,19 @@
+# Secrets -- the SIP password belongs here, never in config.yaml
+.env
+
+# Model weights and caches (several GB)
+voices/*.onnx
+voices/*.onnx.json
+voices/*.wav
+models/
+*.npz
+
+# Call transcripts may contain personal data
+transcripts/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/

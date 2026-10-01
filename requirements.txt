@@ -1,0 +1,23 @@
+# Core runtime
+numpy>=1.26,<3
+scipy>=1.11
+aiohttp>=3.9
+PyYAML>=6.0
+
+# Speech recognition (CTranslate2 backend)
+faster-whisper>=1.1.0
+
+# Voice activity detection: prebuilt wheels, no compiler needed
+webrtcvad-wheels>=2.0.14
+
+# Text to speech (default backend)
+piper-tts>=1.2.0
+onnxruntime>=1.17
+
+# Optional backends -- uncomment what you use:
+#   high-quality GPU voice (~3 GB VRAM, MIT licence, German supported)
+# chatterbox-tts>=0.1.4
+#   CPU embeddings for the knowledge base, keeps VRAM free
+# fastembed>=0.4
+#   Silero VAD (pulls in torch; chatterbox already does)
+# torch>=2.2

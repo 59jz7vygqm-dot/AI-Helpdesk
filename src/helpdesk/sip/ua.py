@@ -7,8 +7,10 @@ outbound REFER so the PBX can move a call the bot cannot handle to a human.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import enum
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
@@ -25,6 +27,9 @@ from .transport import SipTransport, create_transport, detect_local_ip
 log = logging.getLogger(__name__)
 
 USER_AGENT = "ai-helpdesk/1.0"
+
+#: touched while the registration is alive so the container healthcheck can see it
+HEARTBEAT_PATH = os.environ.get("HELPDESK_HEARTBEAT", "/tmp/helpdesk-registered")
 
 
 class CallState(enum.Enum):
@@ -152,6 +157,8 @@ class SipUserAgent:
             except Exception:  # pragma: no cover
                 log.debug("hangup during shutdown failed", exc_info=True)
         if self.registered:
+            with contextlib.suppress(OSError):
+                os.unlink(HEARTBEAT_PATH)
             try:
                 await self._send_register(expires=0)
             except Exception:  # pragma: no cover
@@ -175,6 +182,7 @@ class SipUserAgent:
             try:
                 expires = await self._send_register(expires=self.account.register_expires)
                 self.registered = True
+                self._touch_heartbeat()
                 backoff = 2
                 # Refresh well before expiry so a lost packet does not unregister us.
                 sleep_for = max(30, int(expires * 0.75))
@@ -187,6 +195,13 @@ class SipUserAgent:
                 backoff = min(60, backoff * 2)
                 log.error("registration failed (%s), retrying in %ss", exc, sleep_for)
             await asyncio.sleep(sleep_for)
+
+    def _touch_heartbeat(self) -> None:
+        try:
+            with open(HEARTBEAT_PATH, "w", encoding="utf-8") as handle:
+                handle.write(f"{time.time():.0f} {self.account.username}\n")
+        except OSError:  # pragma: no cover - read-only /tmp
+            log.debug("could not write heartbeat to %s", HEARTBEAT_PATH, exc_info=True)
 
     async def _send_register(self, expires: int) -> int:
         acct = self.account

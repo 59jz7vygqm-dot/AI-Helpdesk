@@ -76,12 +76,13 @@ class SileroVad:
 
     def is_speech(self, frame: np.ndarray, sample_rate: int = 16000) -> bool:
         torch = self._torch
-        # Silero wants 512-sample windows at 16 kHz; a 20 ms frame is 320, so pad.
+        # Silero expects a fixed window: 512 samples at 16 kHz, 256 at 8 kHz.
+        window = 256 if sample_rate == 8000 else 512
         buf = np.asarray(frame, dtype=np.float32) / 32768.0
-        if buf.size < 512:
-            buf = np.pad(buf, (0, 512 - buf.size))
+        if buf.size < window:
+            buf = np.pad(buf, (0, window - buf.size))
         else:
-            buf = buf[:512]
+            buf = buf[:window]
         with torch.no_grad():
             prob = float(self._model(torch.from_numpy(buf), sample_rate).item())
         return prob >= self.threshold
@@ -112,7 +113,9 @@ def build_vad(backend: str, aggressiveness: int = 2):
 @dataclass
 class EndpointerConfig:
     frame_ms: int = 20
-    sample_rate: int = 16000
+    #: 8 kHz: the telephony rate, so detection needs no resampling in the hot
+    #: path.  Only the finished utterance is upsampled, once, for the recogniser.
+    sample_rate: int = 8000
     #: consecutive voiced frames needed to declare speech
     start_frames: int = 3
     #: trailing silence that ends a turn
