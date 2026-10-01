@@ -52,10 +52,16 @@ class OllamaEmbedder(Embedder):
 
 
 class FastEmbedEmbedder(Embedder):
-    """CPU ONNX embeddings; keeps the GPU free for ASR/LLM/TTS."""
+    """CPU ONNX embeddings; keeps the GPU free for ASR/LLM/TTS.
 
-    def __init__(self, model_name: str = "intfloat/multilingual-e5-small",
-                 query_prefix: str = "query: ", document_prefix: str = "passage: ",
+    fastembed only serves models it has converted to ONNX itself, so an arbitrary
+    Hugging Face id does not work. The default is the German-trained Jina model;
+    other options this package carries are listed in the error below when the name
+    does not match.
+    """
+
+    def __init__(self, model_name: str = "jinaai/jina-embeddings-v2-base-de",
+                 query_prefix: str = "", document_prefix: str = "",
                  cache_dir: Optional[str] = None, threads: int = 4) -> None:
         self.model_name = model_name
         self.query_prefix = query_prefix
@@ -68,6 +74,25 @@ class FastEmbedEmbedder(Embedder):
     def _load(self):
         if self._model is None:
             from fastembed import TextEmbedding  # noqa: PLC0415
+
+            # Check the name against what this build serves before the download,
+            # so a typo reports the alternatives instead of a bare ValueError.
+            try:
+                available = [m["model"] for m in TextEmbedding.list_supported_models()]
+            except Exception:  # pragma: no cover - depends on the package
+                available = []
+            if available and self.model_name not in available:
+                multilingual = [
+                    name for name in available
+                    if any(k in name.lower() for k in ("multilingual", "e5", "-de", "paraphrase"))
+                ]
+                raise RuntimeError(
+                    f"fastembed does not serve {self.model_name!r}.\n"
+                    f"Models suitable for German in this build:\n  "
+                    + "\n  ".join(multilingual or available[:10])
+                    + "\nSet knowledge.embeddings.model to one of those, or use "
+                    "backend: ollama with an embedding model you have pulled."
+                )
 
             log.info("loading fastembed model %s", self.model_name)
             self._model = TextEmbedding(
@@ -109,9 +134,10 @@ def build_embedder(config: dict, ollama_client=None) -> Embedder:
         )
     if backend in ("fastembed", "cpu", "onnx"):
         return FastEmbedEmbedder(
-            model_name=config.get("model", "intfloat/multilingual-e5-small"),
-            query_prefix=config.get("query_prefix", "query: "),
-            document_prefix=config.get("document_prefix", "passage: "),
+            model_name=config.get("model", "jinaai/jina-embeddings-v2-base-de"),
+            # Prefixes are an e5 convention; the Jina models want none.
+            query_prefix=config.get("query_prefix", ""),
+            document_prefix=config.get("document_prefix", ""),
             cache_dir=config.get("cache_dir") or None,
             threads=int(config.get("threads", 4)),
         )

@@ -152,10 +152,15 @@ knowledge:
   min_score: 0.28                   # below this, the agent says it cannot help
   embeddings:
     backend: fastembed              # CPU: no VRAM, no extra Ollama model to pull
-    model: intfloat/multilingual-e5-small
+    # fastembed only serves models it ships as ONNX, not arbitrary HF ids.
+    # German-capable choices:
+    #   jinaai/jina-embeddings-v2-base-de              768 dim, trained on German
+    #   sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2  384 dim, smallest
+    #   intfloat/multilingual-e5-large                 1024 dim, needs the prefixes below
+    model: jinaai/jina-embeddings-v2-base-de
     batch_size: 16
-    query_prefix: "query: "
-    document_prefix: "passage: "
+    query_prefix: ""                # only e5 models need "query: " / "passage: "
+    document_prefix: ""
     cache_dir: /models/fastembed
     threads: 4
 
