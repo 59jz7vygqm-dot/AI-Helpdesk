@@ -1,6 +1,11 @@
-# Qwen3-TTS needs Python >= 3.13, which is why this runs in its own container
-# instead of inside the agent image.
-qwen3-tts>=0.1.0
+# The package is `qwen-tts` (Alibaba Qwen team, Apache-2.0), which needs only
+# Python >= 3.9 -- so it also fits the agent image directly, and TTS_PROFILE=qwen
+# is the simpler route. This container exists for the case where you want the
+# voice isolated from the agent's dependencies.
+#
+# NOT `qwen3-tts`: that is an unrelated third-party Apple-Silicon CLI depending on
+# mlx, which cannot run on NVIDIA.
+qwen-tts>=0.1.1
 
 # torch is installed from the CUDA 12.8 index in the Dockerfile, not here, so the
 # wheel matches. It ships the CUDA libraries itself, which is what lets a plain

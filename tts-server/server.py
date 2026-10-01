@@ -75,19 +75,77 @@ def _torch_dtype():
     }.get(DTYPE.lower(), torch.bfloat16)
 
 
+#: the package is published as qwen3-tts; the import name is not documented
+#: consistently, so try the plausible spellings rather than guessing one.
+_MODULE_CANDIDATES = ("qwen_tts", "qwen3_tts", "qwen3tts", "qwentts")
+_CLASS_CANDIDATES = ("Qwen3TTSModel", "Qwen3TTS", "QwenTTSModel", "TTSModel")
+
+
+def _import_model_class():
+    """Find the model class, and say what is actually installed when it fails."""
+    import importlib
+
+    errors = []
+    for module_name in _MODULE_CANDIDATES:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError as exc:
+            errors.append(f"  import {module_name}: {exc}")
+            continue
+        for class_name in _CLASS_CANDIDATES:
+            klass = getattr(module, class_name, None)
+            if klass is not None:
+                log.info("using %s.%s", module_name, class_name)
+                return klass
+        exported = [n for n in dir(module) if not n.startswith("_")][:20]
+        errors.append(f"  {module_name} has no known class; exports: {exported}")
+
+    # List what is installed, so the next step is obvious rather than a guess.
+    try:
+        from importlib.metadata import distributions
+
+        installed = sorted(
+            d.metadata["Name"]
+            for d in distributions()
+            if d.metadata.get("Name") and "qwen" in d.metadata["Name"].lower()
+        )
+    except Exception:
+        installed = []
+
+    raise SystemExit(
+        "Could not import the Qwen3-TTS model class.\n"
+        + "\n".join(errors)
+        + f"\n\nInstalled qwen packages: {installed or 'none'}\n"
+        "Check the import name on https://pypi.org/project/qwen3-tts/ and adjust\n"
+        "_MODULE_CANDIDATES in tts-server/server.py.\n"
+        "Meanwhile the agent runs without this service: start it without\n"
+        "-f docker-compose.qwen.yml to use piper."
+    )
+
+
 def load_model():
     """Load once, tolerating the signature differences between builds."""
     global _model, _clone_prompt
     if _model is not None:
         return _model
 
-    try:
-        from qwen_tts import Qwen3TTSModel
-    except ImportError as exc:
-        raise SystemExit(
-            f"qwen3-tts is not importable: {exc}\n"
-            "The image should have installed it; check the build log."
-        ) from exc
+    Qwen3TTSModel = _import_model_class()
+
+    if DEVICE.startswith("cuda"):
+        import torch
+
+        if not torch.cuda.is_available():
+            raise SystemExit(
+                "torch cannot see a GPU, so QWEN_DEVICE=%s will not work.\n"
+                "Check that the container gets one: docker run --rm --gpus all ...\n"
+                "Set QWEN_DEVICE=cpu to run (far too slow for calls, but it starts)."
+                % DEVICE
+            )
+        log.info(
+            "GPU visible: %s (%.1f GB free)",
+            torch.cuda.get_device_name(0),
+            torch.cuda.mem_get_info()[0] / 1e9,
+        )
 
     log.info("loading %s on %s (%s)", MODEL_ID, DEVICE, DTYPE)
     started = time.monotonic()

@@ -3,8 +3,9 @@ services:
     build:
       context: .
       args:
-        # lite = Piper only (default, builds in minutes).
-        # quality = adds Chatterbox on the GPU.
+        # lite    = Piper only (default, builds in minutes)
+        # qwen    = adds Qwen3-TTS, the best German voice
+        # quality = adds Chatterbox instead (incompatible with qwen)
         TTS_PROFILE: "${TTS_PROFILE:-lite}"
     image: ai-helpdesk:latest
     container_name: ai-helpdesk

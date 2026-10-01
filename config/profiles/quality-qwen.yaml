@@ -1,20 +1,24 @@
 # Profile: Qwen3-TTS - the best German voice available locally.
 #
-# Requires the separate voice container, because the qwen3-tts package needs
-# Python 3.13 while the agent image is built on a CUDA base with 3.10:
+# Build the image with the qwen profile first, which installs the `qwen-tts`
+# package and torch (about 6 GB more image, ~15 minutes):
 #
-#   sudo docker compose -f docker-compose.yml -f docker-compose.qwen.yml up -d --build
+#   TTS_PROFILE=qwen sudo docker compose build
+#   sudo docker compose up -d
+#
+# No second container: the package needs only Python 3.9, so it runs inside the
+# agent image. It cannot be combined with chatterbox, which pins an incompatible
+# transformers version -- pick one.
 #
 #   Ollama  qwen2.5:7b-instruct Q4    ~5.2 GB   on the HOST, pin it to the same GPU
-#   ASR     large-v3-turbo int8       ~1.6 GB   agent container
-#   TTS     Qwen3-TTS 1.7B bfloat16   ~8.0 GB   voice container
+#   ASR     large-v3-turbo int8       ~1.6 GB
+#   TTS     Qwen3-TTS 1.7B bfloat16   ~8.0 GB
 #   KB      fastembed (CPU)                0
 #   ------------------------------------------
 #                                    ~14.8 GB of a 23 GB L4
 #
-# Expect 200-500 ms to first audio instead of piper's ~60 ms. Check the voice
-# container's log for its realtime factor, and fall back to piper by setting
-# tts.backend if it is too slow.
+# Expect 300-700 ms to first audio against piper's ~60 ms. The log reports the
+# realtime factor; piper stays available via tts.backend if it is too slow.
 #
 # Copy over config/config.yaml to use it.
 
@@ -102,24 +106,33 @@ tts:
   #              Run it in its own container and use the openai backend instead;
   #              see the README section "Bessere Stimme".
   # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
-  backend: openai
+  backend: qwen3
 
   qwen3:
     # 1.7B sounds clearly better than 0.6B; drop to 0.6B only if VRAM is tight.
     model_id: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
     device: cuda:0
     dtype: bfloat16
-    language: German             # the model wants a language name, not a code
+    # Validated against the model's own list at startup; a wrong value is
+    # corrected automatically and logged.
+    language: German
     # custom = a built-in speaker | clone = your own voice | design = describe it
     mode: custom
-    speaker: ""                  # see scripts/list_qwen_voices.py
+    # Empty picks the first supported speaker and logs the full list, so the
+    # first start tells you what to choose from.
+    speaker: ""
     instruct: ""                 # e.g. "ruhig, freundlich, sachlich"
-    # mode: clone -- 3-20 s of clean speech plus its exact transcript
+    # mode: clone -- a few seconds of clean speech plus its exact transcript
     reference_audio: ""
     reference_text: ""
     attn_implementation: ""      # "flash_attention_2" if installed
     sample_rate: 24000
-    streaming: true              # used when the installed build exposes it
+    # Sampling. Lower temperature is steadier, higher more expressive.
+    temperature: 0.8
+    top_k: 50
+    top_p: 0.95
+    repetition_penalty: 1.05
+    max_new_tokens: 0            # 0 = model default
 
   piper:
     # medium, not high: the call is 8 kHz, so "high" spends several times the
@@ -148,12 +161,9 @@ tts:
     multilingual: true
 
   openai:
-    # The qwen-tts container from docker-compose.qwen.yml.
     base_url: "http://127.0.0.1:8880/v1"
-    model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
-    # Empty uses the speaker configured in the container (QWEN_SPEAKER).
-    # The roster is at http://127.0.0.1:8880/voices once it is running.
-    voice: ""
+    model: tts-1
+    voice: de_female
     api_key: none
     response_format: pcm           # must be pcm; anything else adds decode delay
     sample_rate: 24000
@@ -181,7 +191,6 @@ knowledge:
   min_score: 0.40
   embeddings:
     backend: fastembed              # CPU: no VRAM, no extra Ollama model to pull
-    # fastembed only serves models it ships as ONNX, not arbitrary HF ids.
     model: jinaai/jina-embeddings-v2-base-de
     batch_size: 16
     query_prefix: ""                # for e5 models use "query: "

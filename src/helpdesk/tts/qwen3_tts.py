@@ -1,32 +1,29 @@
-"""Qwen3-TTS backend -- the quality option.
+"""Qwen3-TTS backend (package `qwen-tts`, Apache-2.0).
 
-Qwen3-TTS (Qwen team, January 2026, Apache-2.0) is the strongest open model that
-covers German with voice cloning and is licensed for commercial use.  Two sizes
-matter here:
+The best German voice available locally, with built-in speakers, zero-shot voice
+cloning and voice design from a text description.
 
-* ``0.6B`` -- about 4 GB of VRAM, the sensible choice when the LLM is also large
-* ``1.7B`` -- about 8 GB, noticeably better prosody
+Written against the installed package's own source, not its documentation. Two
+things that matters for:
 
-Three ways to pick a voice:
+* ``generate_custom_voice`` requires a speaker and validates it against
+  ``get_supported_speakers()``, so an unset or wrong name is a hard error. When
+  none is configured, the first supported speaker is used and logged.
+* The language is likewise validated against ``get_supported_languages()``, so the
+  value is looked up rather than guessed -- the alternative is a model that loads
+  and then fails on the first call.
 
-* ``custom`` -- one of the model's built-in speakers (``speaker``)
-* ``clone``  -- a few seconds of reference audio plus its transcript
-* ``design`` -- describe the voice in words (``instruct``), needs a VoiceDesign model
-
-Latency note: the published 97 ms figure is for the model's own streaming path.
-This wrapper uses it when the installed build exposes one, and otherwise
-synthesises per sentence -- which the session already does, so a sentence of
-speech is ready while the model is still generating the next one.
+There is no streaming API: ``non_streaming_mode=False`` only simulates streaming
+text input and the return is always ``(List[np.ndarray], sample_rate)``. That is
+fine here, because the session synthesises one sentence at a time anyway.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import queue
-import threading
 import time
-from typing import AsyncIterator, Optional, Tuple
+from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -36,20 +33,15 @@ from .text import spoken_form
 
 log = logging.getLogger(__name__)
 
-#: generator-style streaming methods seen across builds, tried in order
-_STREAM_METHODS = (
-    "generate_custom_voice_stream",
-    "generate_voice_clone_stream",
-    "generate_stream",
-    "stream_generate",
-)
+#: language spellings to try when the configured one is not supported
+_LANGUAGE_GUESSES = ("German", "german", "de", "de-DE", "Deutsch")
 
 
 class Qwen3TtsSynthesizer(Synthesizer):
     def __init__(
         self,
         *,
-        model_id: str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        model_id: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         device: str = "cuda:0",
         dtype: str = "bfloat16",
         language: str = "German",
@@ -60,7 +52,11 @@ class Qwen3TtsSynthesizer(Synthesizer):
         reference_text: str = "",
         attn_implementation: str = "",
         sample_rate: int = 24000,
-        streaming: bool = True,
+        temperature: float = 0.8,
+        top_k: int = 50,
+        top_p: float = 0.95,
+        repetition_penalty: float = 1.05,
+        max_new_tokens: int = 0,
     ) -> None:
         self.model_id = model_id
         self.device = device
@@ -73,11 +69,14 @@ class Qwen3TtsSynthesizer(Synthesizer):
         self.reference_text = reference_text
         self.attn_implementation = attn_implementation
         self.sample_rate = sample_rate
-        self.streaming = streaming
+        self.temperature = temperature
+        self.top_k = top_k
+        self.top_p = top_p
+        self.repetition_penalty = repetition_penalty
+        self.max_new_tokens = max_new_tokens
 
         self._model = None
         self._clone_prompt = None
-        self._stream_method: Optional[str] = None
         self._lock = asyncio.Lock()
 
     # ---- loading -------------------------------------------------------
@@ -86,11 +85,12 @@ class Qwen3TtsSynthesizer(Synthesizer):
             return self._model
         try:
             from qwen_tts import Qwen3TTSModel  # noqa: PLC0415
-        except ImportError as exc:  # pragma: no cover - optional dependency
+        except ImportError as exc:
             raise RuntimeError(
-                "Qwen3-TTS is not installed. Install it with:\n"
-                "  pip install qwen3-tts\n"
-                "or switch tts.backend to 'piper' or 'chatterbox'."
+                "Qwen3-TTS is not installed. The package is 'qwen-tts' (not "
+                "'qwen3-tts', which is an unrelated Apple-Silicon CLI).\n"
+                "Rebuild the image with TTS_PROFILE=qwen, or switch tts.backend "
+                "to 'piper'."
             ) from exc
 
         import torch  # noqa: PLC0415
@@ -103,7 +103,14 @@ class Qwen3TtsSynthesizer(Synthesizer):
             "float32": torch.float32,
         }.get(self.dtype_name.lower(), torch.bfloat16)
 
-        kwargs = {"device_map": self.device, "dtype": dtype}
+        if self.device.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(
+                f"torch sees no GPU, so device={self.device!r} cannot work. "
+                "Check that the container gets one, or set tts.qwen3.device to cpu "
+                "(far too slow for calls)."
+            )
+
+        kwargs: Dict = {"device_map": self.device, "dtype": dtype}
         if self.attn_implementation:
             kwargs["attn_implementation"] = self.attn_implementation
 
@@ -112,38 +119,96 @@ class Qwen3TtsSynthesizer(Synthesizer):
         try:
             self._model = Qwen3TTSModel.from_pretrained(self.model_id, **kwargs)
         except TypeError:
-            # Older signatures used torch_dtype and no attn_implementation.
+            # Older builds expect torch_dtype.
             self._model = Qwen3TTSModel.from_pretrained(
                 self.model_id, device_map=self.device, torch_dtype=dtype
             )
-        log.info("Qwen3-TTS ready in %.1fs", time.monotonic() - started)
+        log.info("Qwen3-TTS loaded in %.1fs", time.monotonic() - started)
 
-        if self.mode == "clone":
-            if not self.reference_audio:
-                raise RuntimeError("tts.qwen3.mode=clone needs reference_audio")
-            if hasattr(self._model, "create_voice_clone_prompt"):
-                # Encoding the reference once saves that work on every sentence.
-                self._clone_prompt = self._model.create_voice_clone_prompt(
-                    self.reference_audio, self.reference_text
-                )
-                log.info("cached voice-clone prompt from %s", self.reference_audio)
-
-        if self.streaming:
-            for name in _STREAM_METHODS:
-                if hasattr(self._model, name):
-                    self._stream_method = name
-                    log.info("Qwen3-TTS streaming via %s()", name)
-                    break
-            else:
-                log.info(
-                    "this Qwen3-TTS build exposes no streaming method; "
-                    "synthesising per sentence instead"
-                )
+        self._resolve_language()
+        self._resolve_speaker()
+        self._prepare_clone()
         return self._model
 
+    def _resolve_language(self) -> None:
+        """Pick a language value the model actually accepts."""
+        try:
+            supported = self._model.get_supported_languages()
+        except Exception:
+            supported = None
+        if not supported:
+            return  # model imposes no constraint
+
+        lowered = {str(s).lower(): str(s) for s in supported}
+        for candidate in (self.language, *_LANGUAGE_GUESSES):
+            if candidate and candidate.lower() in lowered:
+                resolved = lowered[candidate.lower()]
+                if resolved != self.language:
+                    log.info("language %r -> %r", self.language, resolved)
+                self.language = resolved
+                return
+        raise RuntimeError(
+            f"none of {[self.language, *_LANGUAGE_GUESSES]} is supported by "
+            f"{self.model_id}. Supported: {sorted(supported)}\n"
+            "Set tts.qwen3.language to one of those."
+        )
+
+    def _resolve_speaker(self) -> None:
+        """generate_custom_voice requires a valid speaker, so settle it now."""
+        if self.mode != "custom":
+            return
+        try:
+            supported = self._model.get_supported_speakers()
+        except Exception:
+            supported = None
+        if not supported:
+            if not self.speaker:
+                log.warning(
+                    "no speaker configured and the model lists none; "
+                    "synthesis may fail"
+                )
+            return
+
+        lowered = {str(s).lower(): str(s) for s in supported}
+        if self.speaker and self.speaker.lower() in lowered:
+            self.speaker = lowered[self.speaker.lower()]
+        else:
+            if self.speaker:
+                log.warning(
+                    "speaker %r is not supported, falling back", self.speaker
+                )
+            self.speaker = sorted(supported)[0]
+            log.info(
+                "using speaker %r (available: %s)",
+                self.speaker,
+                ", ".join(sorted(str(s) for s in supported)[:12]),
+            )
+
+    def _prepare_clone(self) -> None:
+        if self.mode != "clone":
+            return
+        if not self.reference_audio:
+            raise RuntimeError("tts.qwen3.mode=clone needs reference_audio")
+        # Encoding the reference once keeps it off the per-sentence path.
+        self._clone_prompt = self._model.create_voice_clone_prompt(
+            self.reference_audio, self.reference_text or None
+        )
+        log.info("cached voice-clone prompt from %s", self.reference_audio)
+
     # ---- generation ----------------------------------------------------
+    def _sampling_kwargs(self) -> Dict:
+        kwargs: Dict = {
+            "do_sample": True,
+            "temperature": self.temperature,
+            "top_k": self.top_k,
+            "top_p": self.top_p,
+            "repetition_penalty": self.repetition_penalty,
+        }
+        if self.max_new_tokens > 0:
+            kwargs["max_new_tokens"] = self.max_new_tokens
+        return kwargs
+
     def _as_pcm16(self, wavs) -> np.ndarray:
-        """Normalise whatever the model returns into one int16 array."""
         array = wavs
         if isinstance(array, (list, tuple)):
             if not array:
@@ -156,70 +221,37 @@ class Qwen3TtsSynthesizer(Synthesizer):
             array = array[0]
         if array.dtype == np.int16:
             return array
-        return float32_to_pcm16(array.astype(np.float32))
-
-    def _call_kwargs(self) -> dict:
-        if self.mode == "design":
-            return {"text": None, "language": self.language, "instruct": self.instruct}
-        if self.mode == "clone":
-            return {
-                "text": None,
-                "language": self.language,
-                "ref_audio": self.reference_audio,
-                "ref_text": self.reference_text,
-            }
-        kwargs = {"text": None, "language": self.language, "speaker": self.speaker}
-        if self.instruct:
-            kwargs["instruct"] = self.instruct
-        return kwargs
+        samples = np.asarray(array, dtype=np.float32)
+        peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+        if peak > 1.001:
+            # Already int16-scaled, just not typed that way.
+            return np.clip(samples, -32768, 32767).astype(np.int16)
+        return float32_to_pcm16(samples)
 
     def _generate(self, text: str) -> Tuple[np.ndarray, int]:
         model = self._load()
-        kwargs = self._call_kwargs()
-        kwargs["text"] = text
+        kwargs = self._sampling_kwargs()
 
         if self.mode == "design":
-            method = getattr(model, "generate_voice_design")
+            wavs, rate = model.generate_voice_design(
+                text=text, instruct=self.instruct, language=self.language, **kwargs
+            )
         elif self.mode == "clone":
-            method = getattr(model, "generate_voice_clone")
-            if self._clone_prompt is not None:
-                # Reuse the cached reference encoding where the build allows it.
-                try:
-                    wavs, rate = method(
-                        text=text, language=self.language, voice_clone_prompt=self._clone_prompt
-                    )
-                    return self._as_pcm16(wavs), int(rate or self.sample_rate)
-                except TypeError:
-                    pass
+            wavs, rate = model.generate_voice_clone(
+                text=text,
+                language=self.language,
+                voice_clone_prompt=self._clone_prompt,
+                **kwargs,
+            )
         else:
-            method = getattr(model, "generate_custom_voice")
-
-        result = method(**kwargs)
-        if isinstance(result, tuple) and len(result) == 2:
-            wavs, rate = result
-            return self._as_pcm16(wavs), int(rate or self.sample_rate)
-        return self._as_pcm16(result), self.sample_rate
-
-    def _produce_streaming(self, text: str, sink: "queue.Queue", stop: threading.Event) -> None:
-        try:
-            model = self._load()
-            method = getattr(model, self._stream_method)
-            kwargs = self._call_kwargs()
-            kwargs["text"] = text
-            for item in method(**kwargs):
-                if stop.is_set():
-                    break
-                rate = self.sample_rate
-                audio = item
-                if isinstance(item, tuple):
-                    audio = item[0]
-                    if len(item) > 1 and isinstance(item[1], (int, float)) and item[1] > 1000:
-                        rate = int(item[1])
-                sink.put((self._as_pcm16(audio), rate))
-        except Exception as exc:  # pragma: no cover - depends on the build
-            sink.put(exc)
-        finally:
-            sink.put(None)
+            wavs, rate = model.generate_custom_voice(
+                text=text,
+                speaker=self.speaker,
+                language=self.language,
+                instruct=self.instruct or None,
+                **kwargs,
+            )
+        return self._as_pcm16(wavs), int(rate or self.sample_rate)
 
     async def stream(
         self, text: str, *, cancel: Optional[asyncio.Event] = None
@@ -231,56 +263,19 @@ class Qwen3TtsSynthesizer(Synthesizer):
             return
 
         loop = asyncio.get_running_loop()
-        async with self._lock:
-            # Load outside the stream path so a failure is reported once, clearly.
-            await loop.run_in_executor(None, self._load)
-
-            if self._stream_method:
-                sink: "queue.Queue" = queue.Queue()
-                stop = threading.Event()
-                worker = threading.Thread(
-                    target=self._produce_streaming, args=(prepared, sink, stop), daemon=True
-                )
-                started = time.monotonic()
-                worker.start()
-                first = True
-                try:
-                    while True:
-                        if cancel is not None and cancel.is_set():
-                            stop.set()
-                            return
-                        try:
-                            item = await loop.run_in_executor(None, sink.get, True, 0.1)
-                        except queue.Empty:
-                            continue
-                        if item is None:
-                            return
-                        if isinstance(item, Exception):
-                            raise item
-                        pcm, rate = item
-                        if first:
-                            log.debug(
-                                "qwen3-tts first audio after %d ms",
-                                int((time.monotonic() - started) * 1000),
-                            )
-                            first = False
-                        if pcm.size:
-                            self.sample_rate = rate
-                            yield SpeechChunk(pcm=pcm, sample_rate=rate)
-                finally:
-                    stop.set()
-                return
-
+        async with self._lock:  # the GPU is shared with ASR and the LLM
             started = time.monotonic()
             pcm, rate = await loop.run_in_executor(None, self._generate, prepared)
             if cancel is not None and cancel.is_set():
                 return
             self.sample_rate = rate
-            log.debug(
-                "qwen3-tts synthesized %d chars -> %d ms audio in %d ms",
-                len(prepared),
-                int(pcm.size * 1000 / max(rate, 1)),
-                int((time.monotonic() - started) * 1000),
+            audio_ms = pcm.size * 1000 / max(rate, 1)
+            elapsed_ms = (time.monotonic() - started) * 1000
+            rtf = elapsed_ms / audio_ms if audio_ms else 0.0
+            log.log(
+                logging.INFO if rtf > 0.5 else logging.DEBUG,
+                "qwen3-tts: %d chars -> %d ms audio in %d ms (rtf %.2f)",
+                len(prepared), audio_ms, elapsed_ms, rtf,
             )
             if pcm.size:
                 yield SpeechChunk(pcm=pcm, sample_rate=rate, final=True)
@@ -288,10 +283,24 @@ class Qwen3TtsSynthesizer(Synthesizer):
     async def warmup(self) -> None:
         audio = await self.synthesize("Guten Tag, wie kann ich Ihnen helfen?")
         log.info(
-            "Qwen3-TTS warmup done (%d Hz, %d ms of audio)",
-            self.sample_rate,
+            "Qwen3-TTS warm: %d Hz, speaker=%r, language=%r, %d ms of audio",
+            self.sample_rate, self.speaker or "(default)", self.language,
             int(audio.size * 1000 / max(self.sample_rate, 1)),
         )
+
+    def describe(self) -> Dict:
+        """Speakers and languages this model supports, for diagnostics."""
+        model = self._load()
+        out: Dict = {"model": self.model_id, "speaker": self.speaker, "language": self.language}
+        try:
+            out["speakers"] = model.get_supported_speakers()
+        except Exception:
+            out["speakers"] = None
+        try:
+            out["languages"] = model.get_supported_languages()
+        except Exception:
+            out["languages"] = None
+        return out
 
     async def close(self) -> None:
         self._model = None
