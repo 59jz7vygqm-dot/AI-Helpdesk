@@ -747,10 +747,15 @@ class SipUserAgent:
             )
             return "dtmf"
 
+        if not call.active:
+            raise TransferError(f"call is {call.state.value}, cannot transfer")
         try:
             await self.transfer_refer(call, target_number, timeout=timeout)
             return "refer"
         except TransferError as exc:
+            if not call.active:
+                # The call ended underneath us; a feature code would go nowhere.
+                raise
             log.warning("REFER refused (%s); falling back to the DTMF feature code", exc)
             await self.transfer_dtmf(
                 call, target_number, feature_code=feature_code,

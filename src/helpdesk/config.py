@@ -178,6 +178,16 @@ DEFAULTS: Dict[str, Any] = {
         "not_understood": "Entschuldigung, das habe ich nicht verstanden. Können Sie das bitte wiederholen?",
         "still_there": "Sind Sie noch da?",
         "thinking": "",
+        # Played when the answer is not ready within filler_after_ms. Several
+        # variants, because hearing the identical phrase every turn is worse than
+        # the pause it covers. Pre-rendered at startup, so they cost nothing.
+        "fillers": [
+            "Einen Moment.",
+            "Einen Augenblick bitte.",
+            "Ich schaue kurz nach.",
+            "Moment, ich prüfe das.",
+        ],
+        "filler_after_ms": 700,
         "transfer_number": "",
         "transfer_method": "auto",
         "transfer_dtmf_feature_code": "##",

@@ -209,6 +209,8 @@ def build_config(**dialog_overrides) -> dict:
                           "speculative_silence_ms": 60, "pre_roll_ms": 60,
                           "barge_in_ms": 100, "start_frames": 2})
     config["dialog"].update({
+        "fillers": ["Einen Moment.", "Einen Augenblick bitte.", "Ich schaue kurz nach."],
+        "filler_after_ms": 60,
         "greeting": "Guten Tag, hier ist der Service. Wie kann ich helfen?",
         "transfer_number": "200", "silence_prompt_after_ms": 400,
         "silence_hangup_after_ms": 1200, "max_call_seconds": 60,
@@ -228,6 +230,7 @@ async def build_session(asr_texts, llm_replies, *, config=None, tts_delay=0.0):
     llm = StubLlm(llm_replies)
     agent = HelpdeskAgent(llm, None, company="Testfirma")
     texts = DialogTexts(
+        fillers=list(config["dialog"].get("fillers") or []),
         greeting=config["dialog"]["greeting"],
         transfer_announcement="Ich verbinde Sie.",
         transfer_failed="Das geht gerade nicht.",
@@ -429,6 +432,85 @@ async def test_dtmf_zero_transfers():
     return True
 
 
+async def test_filler_covers_a_slow_answer():
+    """A slow answer gets a spoken filler, and never the same one twice."""
+    config = build_config(filler_after_ms=40)
+    session, call, ua, synth, llm = await build_session(
+        ["Erste Frage", "Zweite Frage", "Dritte Frage"],
+        ["Antwort eins.", "Antwort zwei.", "Antwort drei."],
+        config=config,
+    )
+    # A model that takes a while to produce its first token
+    llm.first_token_delay = 0.35
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+
+    used = []
+    for _ in range(3):
+        before = len(synth.spoken)
+        await feed(session, speech(30) + silence(15))
+        await wait_until(lambda: len(synth.spoken) > before, 6, "turn answered")
+        await asyncio.sleep(0.1)
+        played = [p for p in session.phrases._audio if p in config["dialog"]["fillers"]]
+        if session._last_filler:
+            used.append(session._last_filler)
+
+    assert used, "no filler was ever played on a slow answer"
+    assert len(set(used)) > 1 or len(used) == 1, f"filler never varied: {used}"
+    # Consecutive repeats are what sounds mechanical
+    repeats = [a for a, b in zip(used, used[1:]) if a == b]
+    assert not repeats, f"the same filler was used twice in a row: {used}"
+    print(f"PASS fillers played and varied: {used}")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_filler_skipped_when_answer_is_fast():
+    """A fast answer must not get a filler glued in front of it."""
+    config = build_config(filler_after_ms=800)
+    session, call, ua, synth, llm = await build_session(
+        ["Eine Frage"], ["Sofortige Antwort."], config=config
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: any("Sofortige" in s for s in synth.spoken), 5, "answer")
+    await asyncio.sleep(0.3)
+    assert not session._last_filler, f"filler used on a fast answer: {session._last_filler}"
+    print("PASS no filler when the answer arrives in time")
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_hangup_during_answer_skips_transfer():
+    """If the caller hangs up mid-answer, do not transfer or apologise."""
+    session, call, ua, synth, llm = await build_session(
+        ["Ich will einen Menschen"], ["Ich verbinde Sie. [WEITERLEITEN]"], tts_delay=0.03
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: synth.spoken, 4, "reply started")
+    # Caller hangs up while the reply is still being produced
+    call.state = CallState.ENDED
+    session._on_call_end("remote-bye")
+    await asyncio.sleep(0.4)
+    assert ua.transfers == [], f"transferred a dead call: {ua.transfers}"
+    assert not any("nicht verbinden" in s for s in synth.spoken), \
+        "played the failure announcement into a dead call"
+    print("PASS hangup during the answer: no transfer, no announcement")
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
 async def test_farewell_ends_the_call():
     """Saying goodbye must hang up politely, never transfer."""
     session, call, ua, synth, llm = await build_session(
@@ -603,6 +685,9 @@ async def main() -> int:
         ("echo does not interrupt", test_echo_does_not_interrupt),
         ("transfer method passthrough", test_transfer_method_passed_through),
         ("farewell ends call", test_farewell_ends_the_call),
+        ("filler on slow answer", test_filler_covers_a_slow_answer),
+        ("no filler when fast", test_filler_skipped_when_answer_is_fast),
+        ("hangup during answer", test_hangup_during_answer_skips_transfer),
     ]
     failed = 0
     for name, test in tests:

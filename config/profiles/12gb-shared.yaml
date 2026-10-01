@@ -199,12 +199,13 @@ vad:
   resume_on_backchannel: true
 
 dialog:
-  company: "der Beispiel GmbH"
+  # Without an article, so it reads correctly in every sentence the model builds.
+  company: "Beispiel GmbH"
   agent_name: "Alex"
 
   greeting: >-
-    Guten Tag, hier ist der automatische Service der Beispiel GmbH.
-    Wie kann ich Ihnen helfen?
+    Guten Tag, hier ist der Service der Beispiel GmbH.
+    Was kann ich für Sie tun?
   transfer_announcement: "Einen Moment bitte, ich verbinde Sie mit einem Kollegen."
   transfer_failed: >-
     Ich kann Sie im Moment leider nicht verbinden.
@@ -215,6 +216,16 @@ dialog:
   # Spoken only before long answers, so silence does not feel like a dropped
   # call.  Leave empty to disable -- it costs a little time on every long turn.
   thinking: ""
+
+  # Played when the answer is not ready within filler_after_ms. Pre-rendered at
+  # startup, so they cost nothing. Several variants on purpose: the same phrase
+  # every turn sounds more mechanical than the pause it replaces.
+  fillers:
+    - "Einen Moment."
+    - "Einen Augenblick bitte."
+    - "Ich schaue kurz nach."
+    - "Moment, ich prüfe das."
+  filler_after_ms: 700              # 0 disables them
 
   transfer_number: "200"            # REQUIRED: extension, queue or full number
 

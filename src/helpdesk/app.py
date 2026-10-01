@@ -68,6 +68,7 @@ class HelpdeskApplication:
             not_understood=dialog.get("not_understood", ""),
             still_there=dialog.get("still_there", ""),
             thinking=dialog.get("thinking", "") or "",
+            fillers=[f for f in (dialog.get("fillers") or []) if f],
         )
 
         llm_config = config["llm"]

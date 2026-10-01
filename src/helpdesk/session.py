@@ -23,8 +23,9 @@ import contextlib
 import json
 import logging
 import os
+import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -53,6 +54,11 @@ class DialogTexts:
     not_understood: str
     still_there: str
     thinking: str = ""
+    #: Short interjections played while the answer is still being produced. A
+    #: person says "einen Moment" instead of going silent, and several variants
+    #: are needed because the same one every time sounds more mechanical than
+    #: the silence it replaces.
+    fillers: List[str] = field(default_factory=list)
 
     def fixed_phrases(self) -> List[str]:
         return [
@@ -63,6 +69,7 @@ class DialogTexts:
             self.not_understood,
             self.still_there,
             self.thinking,
+            *self.fillers,
         ]
 
 
@@ -134,6 +141,9 @@ class CallSession:
         )
         self.resume_on_backchannel = bool(vad_config.get("resume_on_backchannel", True))
         self.farewell_ends_call = bool(dialog.get("farewell_ends_call", True))
+        self.filler_after_ms = int(dialog.get("filler_after_ms", 700))
+        self._last_filler = ""
+        self._filler_task: Optional[asyncio.Task] = None
 
         tts_config = config["tts"]
         self._streamer_kwargs = dict(
@@ -270,10 +280,47 @@ class CallSession:
 
     def _interrupt_speech(self) -> None:
         """Stop producing and discard what is queued, in that order."""
+        self._cancel_filler()
         self._cancel_speech.set()
         if self.call.rtp:
             self.call.rtp.clear_playout()
         self._speaking = False
+
+    def _pick_filler(self) -> str:
+        """A filler, never the same one twice in a row."""
+        options = [f for f in self.texts.fillers if f and f != self._last_filler]
+        if not options:
+            options = [f for f in self.texts.fillers if f]
+        if not options:
+            return ""
+        chosen = random.choice(options)
+        self._last_filler = chosen
+        return chosen
+
+    async def _maybe_filler(self) -> None:
+        if not self.texts.fillers or self.filler_after_ms <= 0:
+            return
+        try:
+            await asyncio.sleep(self.filler_after_ms / 1000)
+        except asyncio.CancelledError:
+            return
+        if self._cancel_speech.is_set() or self._done.is_set():
+            return
+        if self._bot_audio_playing():
+            return  # the real answer already started
+        filler = self._pick_filler()
+        if not filler:
+            return
+        audio = self.phrases.get(filler)
+        if audio is None:
+            return  # not pre-rendered; never synthesise one on the critical path
+        log.info("filler %r while the answer is still coming", filler)
+        await self._play(audio)
+
+    def _cancel_filler(self) -> None:
+        if self._filler_task is not None and not self._filler_task.done():
+            self._filler_task.cancel()
+        self._filler_task = None
 
     async def _resume_speaking(self, text: str) -> None:
         """Speak text that an interruption cut short, without asking the model."""
@@ -304,6 +351,10 @@ class CallSession:
         self._reset_speech_plan()
         self._interrupted_remainder = ""
 
+        # If producing the answer takes long enough to be noticeable, say
+        # something rather than leaving the line silent.
+        self._filler_task = asyncio.ensure_future(self._maybe_filler())
+
         retrieval_started = time.monotonic()
         context, _ = await self.agent.retrieve(user_text)
         metrics.retrieval_ms = int((time.monotonic() - retrieval_started) * 1000)
@@ -315,6 +366,7 @@ class CallSession:
                     return
                 audio = resample(piece.pcm, piece.sample_rate, TELEPHONY_RATE)
                 if not first_audio_logged:
+                    self._cancel_filler()
                     metrics.tts_first_chunk_ms = int((time.monotonic() - turn_started) * 1000)
                     if metrics.speech_end_at:
                         metrics.response_ms = int((time.monotonic() - metrics.speech_end_at) * 1000)
@@ -433,6 +485,13 @@ class CallSession:
 
     # ---- actions -------------------------------------------------------
     async def _do_transfer(self) -> None:
+        if self._done.is_set() or not self.call.active:
+            # The caller hung up while the answer was still being produced; there
+            # is nobody left to transfer or apologise to.
+            log.info("skipping transfer: call already ended (%s)", self.call.end_reason or "hung up")
+            self.metrics.end_reason = self.metrics.end_reason or self.call.end_reason or "ended"
+            self._done.set()
+            return
         if not self.transfer_number:
             log.warning("transfer requested but no transfer_number configured")
             await self._speak_cached(self.texts.transfer_failed)

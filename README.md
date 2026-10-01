@@ -414,7 +414,13 @@ drehen, sondern der Wissensdatenbank einen Abschnitt zu dieser Frage zu geben.
 unpassender Treffer, aus dem improvisiert wird. 0,40 ist der Startwert; wenn der
 Agent zu oft weiterleitet, in 0,05er-Schritten senken.
 
-**3. Erst dann an der Latenz drehen.** Und dort zuerst die Sprachausgabe: Im Log
+**3. Füllwörter nutzen.** Ein Mensch sagt „einen Moment", bevor er nachdenkt —
+er geht nicht stumm. Das ist in `dialog.fillers` eingebaut: vier Varianten, beim
+Start vorgerendert (kosten also keine Zeit), gespielt sobald die Antwort länger
+als `filler_after_ms` braucht. Nie zweimal derselbe hintereinander, weil
+*das* mechanischer klingt als die Pause. Bei schnellen Antworten passiert nichts.
+
+**4. Erst dann an der Latenz drehen.** Und dort zuerst die Sprachausgabe: Im Log
 steht pro Antwort, wohin die Zeit ging.
 
 ```
@@ -525,6 +531,16 @@ nehmen (bei 8 kHz hörst du keinen Unterschied) und `tts.piper.threads` setzen.
 **Er redet zu lang** — `dialog.max_sentences: 2` und `llm.options.num_predict`
 runter. Am Telefon sind zwei Sätze plus Rückfrage besser als eine vollständige
 Anleitung.
+
+**Er erfindet Rückfragen** („Haben Sie eine Bestellnummer?", obwohl nirgends von
+Bestellungen die Rede war) — passiert, wenn die Wissensdatenbank zur Frage nichts
+hergibt. Der Prompt unterscheidet jetzt: Gesprächsführung darf er frei
+formulieren, Tatsachen über das Unternehmen nur aus dem WISSEN. Wenn es dort
+nichts gibt, soll er einmal gezielt nachfragen und dann weiterleiten.
+
+**Er leitet bei „Vielen Dank" weiter** — behoben: eine Verabschiedung beendet das
+Gespräch jetzt im Code, ohne Modellaufruf. Abschaltbar über
+`dialog.farewell_ends_call: false`.
 
 ---
 
