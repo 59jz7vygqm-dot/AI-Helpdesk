@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import enum
+import errno
 import logging
 import os
 import time
@@ -142,14 +143,41 @@ class SipUserAgent:
         self._call_tasks: Dict[str, asyncio.Task] = {}
 
     # ---- lifecycle -----------------------------------------------------
-    async def start(self) -> None:
+    async def bind(self) -> None:
+        """Claim the SIP port.
+
+        Separate from start() so the caller can do this before loading models:
+        a port clash is instant to detect and pointless to discover after a
+        minute of warmup.
+        """
+        if self.transport is not None:
+            return
         acct = self.account
         if not self.local_ip:
             self.local_ip = detect_local_ip(acct.server_host, acct.server_port)
-        log.info("SIP local address %s:%s -> PBX %s:%s", self.local_ip, acct.bind_port, acct.server_host, acct.server_port)
-        self.transport = await create_transport(
-            acct.bind_host, acct.bind_port, self._on_message, trace=acct.trace
+        log.info(
+            "SIP local address %s:%s -> PBX %s:%s",
+            self.local_ip, acct.bind_port, acct.server_host, acct.server_port,
         )
+        try:
+            self.transport = await create_transport(
+                acct.bind_host, acct.bind_port, self._on_message, trace=acct.trace
+            )
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                raise RuntimeError(
+                    f"UDP port {acct.bind_port} is already in use.\n"
+                    f"Something else holds it -- another instance of this agent, or a "
+                    f"local SIP service. Find it with:\n"
+                    f"  sudo ss -lunp | grep :{acct.bind_port}\n"
+                    f"  sudo docker ps -a\n"
+                    f"Then stop it (sudo docker compose down), or set sip.bind_port "
+                    f"to a free port such as 5080."
+                ) from exc
+            raise
+
+    async def start(self) -> None:
+        await self.bind()
         self._register_call_id = sipmsg.new_call_id(self.local_ip)
         self._register_task = asyncio.ensure_future(self._register_loop())
 

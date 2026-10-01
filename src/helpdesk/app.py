@@ -144,6 +144,18 @@ class HelpdeskApplication:
                 min_score=float(knowledge_config.get("min_score", 0.28)),
             )
 
+        self.ua = SipUserAgent(
+            self._build_account(),
+            self._handle_call,
+            max_concurrent_calls=int(config["sip"].get("max_concurrent_calls", 1)),
+        )
+        # Claim the SIP port first: it costs nothing and failing here after a
+        # minute of model loading wastes the whole warmup.
+        try:
+            await self.ua.bind()
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
+
         # Warm everything before the first call: a cold model load during a live
         # call is the difference between 600 ms and 30 seconds.
         log.info("warming up ...")
@@ -156,8 +168,9 @@ class HelpdeskApplication:
         await self.phrases.prepare_all(self.texts.fixed_phrases())
         log.info("warmup complete in %.1fs", time.monotonic() - started)
 
-        sip_config = config["sip"]
-        account = SipAccount(
+    def _build_account(self) -> SipAccount:
+        sip_config = self.config["sip"]
+        return SipAccount(
             username=str(sip_config["username"]),
             password=str(sip_config["password"]),
             domain=str(sip_config.get("domain") or sip_config["server_host"]),
@@ -175,11 +188,6 @@ class HelpdeskApplication:
             ),
             codec_preference=list(sip_config.get("codec_preference") or ["PCMA", "PCMU"]),
             trace=bool(sip_config.get("trace", False)),
-        )
-        self.ua = SipUserAgent(
-            account,
-            self._handle_call,
-            max_concurrent_calls=int(sip_config.get("max_concurrent_calls", 1)),
         )
 
     # ---- per call ------------------------------------------------------
