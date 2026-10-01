@@ -8,6 +8,35 @@ PASS=0
 WARN=0
 FAIL=0
 
+# Logs go to unique paths: a leftover file from a run as another user would make
+# the redirection fail, which looked like the command itself failing.
+LOGDIR=$(mktemp -d 2>/dev/null || echo "/tmp")
+trap 'rm -rf "$LOGDIR" 2>/dev/null' EXIT
+
+# Read one key from a top-level section of a YAML file. Only keys indented by
+# exactly two spaces count, so a nested block cannot be mistaken for the section
+# itself, and two sections sharing a key name stay distinct.
+yaml_get() {
+  awk -v want_sec="$2" -v want_key="$3" '
+    /^[A-Za-z_][A-Za-z0-9_]*:/ {
+      sec = substr($0, 1, index($0, ":") - 1)
+      next
+    }
+    sec != want_sec { next }
+    /^  [A-Za-z_]/ {
+      line = substr($0, 3)
+      if (index(line, want_key ":") == 1) {
+        val = substr(line, length(want_key) + 2)
+        sub(/#.*/, "", val)
+        gsub(/^[ \t]+|[ \t]+$/, "", val)
+        gsub(/^"|"$/, "", val)
+        print val
+        exit
+      }
+    }
+  ' "$1"
+}
+
 ok()   { printf '  \033[32mOK\033[0m    %s\n' "$1"; PASS=$((PASS+1)); }
 warn() { printf '  \033[33mWARN\033[0m  %s\n' "$1"; WARN=$((WARN+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
@@ -60,6 +89,11 @@ echo
 echo "=== 2. Docker ==="
 if command -v docker >/dev/null 2>&1; then
   ok "docker $(docker --version | sed 's/Docker version //;s/,.*//')"
+  if ! docker info >/dev/null 2>&1; then
+    warn "this user cannot talk to the docker daemon"
+    hint "run every docker command with sudo, or: sudo usermod -aG docker $USER"
+    hint "then log out and back in"
+  fi
   if docker compose version >/dev/null 2>&1; then
     ok "docker compose available"
   else
@@ -72,7 +106,7 @@ if command -v docker >/dev/null 2>&1; then
   IMAGE=nvidia/cuda:12.8.1-base-ubuntu22.04
   for spec in "--gpus device=$GPU_ID" "--device nvidia.com/gpu=$GPU_ID" "--gpus all"; do
     # shellcheck disable=SC2086
-    if docker run --rm $spec "$IMAGE" nvidia-smi -L >/tmp/preflight-gpu.log 2>&1; then
+    if docker run --rm $spec "$IMAGE" nvidia-smi -L >"$LOGDIR/gpu.log" 2>&1; then
       GPU_SPEC="$spec"
       break
     fi
@@ -82,7 +116,7 @@ if command -v docker >/dev/null 2>&1; then
       bad "containers cannot use any GPU"
       hint "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
       hint "sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
-      hint "details: /tmp/preflight-gpu.log"
+      hint "details: $LOGDIR/gpu.log"
       ;;
     "--gpus all")
       warn "only '--gpus all' works, not per-device selection"
@@ -91,12 +125,12 @@ if command -v docker >/dev/null 2>&1; then
       hint "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
       ;;
     "--device nvidia.com/gpu=$GPU_ID")
-      ok "containers can use GPU $GPU_ID via CDI: $(head -1 /tmp/preflight-gpu.log)"
+      ok "containers can use GPU $GPU_ID via CDI: $(head -1 "$LOGDIR/gpu.log")"
       warn "this host needs the CDI form in compose"
       hint "start with: docker compose -f docker-compose.yml -f docker-compose.cdi.yml up -d --build"
       ;;
     *)
-      ok "containers can use GPU $GPU_ID: $(head -1 /tmp/preflight-gpu.log)"
+      ok "containers can use GPU $GPU_ID: $(head -1 "$LOGDIR/gpu.log")"
       ;;
   esac
 else
@@ -105,19 +139,21 @@ fi
 
 echo
 echo "=== 3. Language model ==="
-LLM_BACKEND=$(grep -m1 '^  backend:' config/config.yaml 2>/dev/null | awk '{print $2}')
+LLM_BACKEND=$(yaml_get config/config.yaml llm backend 2>/dev/null)
 LLM_BACKEND="${LLM_BACKEND:-ollama}"
+CONFIG_MODEL=$(yaml_get config/config.yaml llm model 2>/dev/null)
 if [ "$LLM_BACKEND" = "ollama" ]; then
   OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
-  if curl -sf --max-time 5 "$OLLAMA_URL/api/tags" -o /tmp/preflight-ollama.json; then
+  if curl -sf --max-time 5 "$OLLAMA_URL/api/tags" -o "$LOGDIR/ollama.json"; then
     ok "Ollama reachable at $OLLAMA_URL"
-    LLM_MODEL="${LLM_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
-    if grep -q "\"${LLM_MODEL}\"" /tmp/preflight-ollama.json; then
+    # .env wins over the file, because compose passes it as an override.
+    LLM_MODEL="${LLM_MODEL:-${CONFIG_MODEL:-qwen2.5:7b-instruct-q4_K_M}}"
+    if grep -q "\"${LLM_MODEL}\"" "$LOGDIR/ollama.json"; then
       ok "model present: $LLM_MODEL"
     else
       bad "model missing: $LLM_MODEL"
       hint "ollama pull $LLM_MODEL"
-      echo "        installed: $(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' /tmp/preflight-ollama.json | head -8 | tr '\n' ' ')"
+      echo "        installed: $(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' "$LOGDIR/ollama.json" | head -8 | tr '\n' ' ')"
     fi
     # On a multi-GPU host Ollama must be pinned to the same free card, or it
     # takes GPU 0 and fails there.
@@ -146,12 +182,18 @@ if [ "$LLM_BACKEND" = "ollama" ]; then
     hint "or point llm.backend=openai at an existing server (e.g. your vLLM)"
   fi
 else
-  BASE_URL=$(grep -m1 '^  base_url:' config/config.yaml | awk '{print $2}' | tr -d '"')
-  if curl -sf --max-time 5 "${BASE_URL}/models" -o /tmp/preflight-llm.json; then
+  BASE_URL=$(yaml_get config/config.yaml llm base_url)
+  if curl -sf --max-time 5 "${BASE_URL}/models" -o "$LOGDIR/llm.json"; then
     ok "inference server reachable at $BASE_URL"
-    echo "        serves: $(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' /tmp/preflight-llm.json | head -4 | tr '\n' ' ')"
+    served=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$LOGDIR/llm.json" | head -4 | tr '\n' ' ')
+    echo "        serves: $served"
+    if [ -n "$CONFIG_MODEL" ] && ! grep -q "\"$CONFIG_MODEL\"" "$LOGDIR/llm.json"; then
+      bad "llm.model is $CONFIG_MODEL, but the server serves: $served"
+      hint "set llm.model in config/config.yaml to one of those"
+    fi
   else
     bad "cannot reach the inference server at $BASE_URL"
+    hint "base_url must include /v1 for an OpenAI-compatible server"
   fi
 fi
 
@@ -206,10 +248,10 @@ fi
 
 echo
 echo "=== 6. Offline test suite ==="
-if PYTHONPATH=src timeout 300 ./scripts/run_tests.sh >/tmp/preflight-tests.log 2>&1; then
-  ok "all offline tests pass ($(grep -c '  ok ' /tmp/preflight-tests.log) unit checks)"
+if PYTHONPATH=src timeout 300 ./scripts/run_tests.sh >"$LOGDIR/tests.log" 2>&1; then
+  ok "all offline tests pass ($(grep -c '  ok ' "$LOGDIR/tests.log") unit checks)"
 else
-  warn "offline tests did not pass -- see /tmp/preflight-tests.log"
+  warn "offline tests did not pass -- see $LOGDIR/tests.log"
   hint "needs python3 with numpy and scipy on the host; harmless to skip"
 fi
 
