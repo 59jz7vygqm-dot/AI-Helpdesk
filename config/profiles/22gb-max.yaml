@@ -22,6 +22,15 @@
 #   HELPDESK_TTS_PIPER_MODEL_PATH=/models/piper/de_DE-thorsten-high.onnx
 # Keep the SIP password in the environment, not in this file.
 
+# AI Helpdesk configuration.
+#
+# Every scalar here can be overridden from the environment as
+# HELPDESK_<SECTION>_<KEY>, nested keys included:
+#   HELPDESK_SIP_SERVER_HOST=10.0.0.1
+#   HELPDESK_VAD_END_SILENCE_MS=350
+#   HELPDESK_TTS_PIPER_MODEL_PATH=/models/piper/de_DE-thorsten-high.onnx
+# Keep the SIP password in the environment, not in this file.
+
 sip:
   username: "900"                  # the extension the PBX knows
   password: ""                     # set HELPDESK_SIP_PASSWORD instead
@@ -62,7 +71,12 @@ asr:
   cpu_threads: 4
 
 llm:
+  # ollama = local Ollama daemon
+  # openai = any OpenAI-compatible server (vLLM, TGI, llama.cpp, LM Studio);
+  #          then base_url ends in /v1 and model is the name it serves
+  backend: ollama
   base_url: "http://127.0.0.1:11434"
+  api_key: "none"                  # only used by the openai backend
   # 7B is the sweet spot for a phone helpdesk: answers are short and grounded in
   # retrieved text, so a 14B rarely says anything better -- it just answers later.
   # Spend spare VRAM on the voice instead; that is what callers notice.
@@ -148,7 +162,7 @@ knowledge:
   dense_weight: 0.72                # rest is BM25; lower it if exact terms matter
   min_score: 0.28                   # below this, the agent says it cannot help
   embeddings:
-    backend: fastembed              # CPU: keeps all VRAM for ASR/LLM/TTS
+    backend: fastembed              # CPU: no VRAM, no extra Ollama model to pull
     model: intfloat/multilingual-e5-small
     batch_size: 16
     query_prefix: "query: "

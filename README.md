@@ -92,12 +92,17 @@ In `config/profiles/` liegen drei vollständige Konfigurationen. Eine davon übe
 | Profil | VRAM | Stimme | LLM | Wofür |
 |---|---|---|---|---|
 | `12gb-shared.yaml` | ~11 GB | Qwen3-TTS 0.6B | 7B | GPU wird geteilt, ~12 GB frei |
-| **`16gb-quality.yaml`** | **~15 GB** | **Qwen3-TTS 1.7B** | **7B** | **meine Empfehlung** |
+| **`demo-single-gpu.yaml`** | **~15 GB** | **Qwen3-TTS 1.7B** | **7B** | **eine eigene L4, Demo-/Testbetrieb** |
+| `16gb-quality.yaml` | ~15 GB | Qwen3-TTS 1.7B | 7B | wie oben, Embeddings über Ollama |
 | `22gb-max.yaml` | ~20 GB | Qwen3-TTS 1.7B | 14B | L4 komplett frei |
 
 ```bash
-cp config/profiles/16gb-quality.yaml config/config.yaml
+cp config/profiles/demo-single-gpu.yaml config/config.yaml
 ```
+
+`demo-single-gpu.yaml` ist der Startpunkt für „eine freie L4": gute Stimme,
+kleines Sprachmodell, Embeddings auf der CPU — also kein zweites Ollama-Modell
+zum Herunterladen.
 
 **Warum ich bei 16 GB das 7B-Modell behalte, obwohl Platz für 14B wäre:** Am
 Telefon hört der Anrufer die Stimme, nicht die Modellgröße. Die Antworten sind
@@ -154,6 +159,44 @@ Auf dem Host: Docker mit NVIDIA Container Toolkit, und Ollama läuft bereits.
 nvidia-smi -L                    # UUID der L4 notieren
 curl -s localhost:11434/api/tags # Ollama erreichbar?
 ```
+
+### 1b. Mehrere GPUs: beide Seiten auf dieselbe freie Karte pinnen
+
+Überspringen, wenn der Server nur eine GPU hat. Sonst ist das der Schritt, an dem
+es sonst scheitert: **Ollama nimmt sich ohne Pinning GPU 0** — und wenn die voll
+ist, läuft das Modell auf der CPU oder stirbt mit „out of memory".
+
+```bash
+nvidia-smi    # welche Karte ist frei? Index notieren, hier Beispiel 4
+```
+
+Container (in `.env`):
+
+```bash
+GPU_ID=4
+```
+
+Ollama (systemd-Override, sonst wirkt es nicht):
+
+```bash
+sudo systemctl edit ollama
+```
+
+Diese zwei Zeilen eintragen:
+
+```ini
+[Service]
+Environment="CUDA_VISIBLE_DEVICES=4"
+```
+
+Dann:
+
+```bash
+sudo systemctl restart ollama
+nvidia-smi --id=4           # nach dem ersten Anruf muss hier Ollama auftauchen
+```
+
+`./scripts/preflight.sh` prüft beides und meckert, wenn nur eine Seite gepinnt ist.
 
 ### 2. Profil wählen und Modelle holen
 
@@ -361,7 +404,13 @@ Hosts setzen.
 
 **Der Agent antwortet erst nach Sekunden** — prüfen, ob das Modell im VRAM
 geblieben ist (`nvidia-smi`, und `keep_alive: "-1"`). Wenn das erste Token
-dauert, ist das Modell zu groß oder es wird in den RAM ausgelagert.
+dauert, ist das Modell zu groß oder es wird in den RAM ausgelagert. Auf einem
+Server mit mehreren GPUs ist die häufigste Ursache, dass Ollama nicht gepinnt ist
+und auf einer vollen Karte in den RAM ausgelagert wurde — siehe Schritt 1b.
+
+**`out of memory` beim Start** — Container und Ollama liegen auf verschiedenen
+Karten, oder auf einer belegten. `nvidia-smi` zeigt, wer wo wie viel hält;
+`GPU_ID` und `CUDA_VISIBLE_DEVICES` müssen auf dieselbe freie Karte zeigen.
 
 **Er fällt mir ins Wort** — `vad.end_silence_ms` hoch (500–600).
 **Er reagiert zu träge** — denselben Wert runter (300–350).
@@ -434,7 +483,7 @@ src/helpdesk/
   sip/          SIP und RTP: Nachrichten, Digest-Auth, SDP, Medien, User Agent
   audio/        G.711-Codec, Resampling, Sprachaktivität und Endpunkterkennung
   asr/          faster-whisper mit Halluzinationsfilter
-  llm/          Ollama-Streaming und der Dialogagent
+  llm/          Ollama- und OpenAI/vLLM-Streaming, der Dialogagent
   tts/          Qwen3-TTS, Piper, Chatterbox, OpenAI-kompatibel, Satzaufteilung
   kb/           Markdown-Chunking, Embeddings, hybride Suche
   session.py    Gesprächsablauf: der Latenzpfad

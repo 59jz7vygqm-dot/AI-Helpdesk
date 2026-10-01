@@ -41,7 +41,8 @@ services:
       HELPDESK_DIALOG_TRANSFER_METHOD: "${TRANSFER_METHOD:-auto}"
       HELPDESK_DIALOG_TRANSFER_DTMF_FEATURE_CODE: "${TRANSFER_FEATURE_CODE:-##}"
 
-      NVIDIA_VISIBLE_DEVICES: "${GPU_UUID:-all}"
+      # Which GPU this container may use. Index or UUID; see nvidia-smi -L.
+      NVIDIA_VISIBLE_DEVICES: "${GPU_ID:-0}"
 
     volumes:
       - ./config:/app/config:ro
@@ -55,9 +56,10 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              # Pin the L4 by UUID if other GPUs are present:
-              # device_ids: ["GPU-xxxxxxxx-...."]
-              count: 1
+              # One specific GPU, by index or UUID (GPU_ID in .env). Pinning
+              # matters on a multi-GPU host: without it the container may land on
+              # a card that is already full and fail to allocate.
+              device_ids: ["${GPU_ID:-0}"]
               capabilities: [gpu]
 
     # faster-whisper and the TTS backends use shared memory for dataloading.

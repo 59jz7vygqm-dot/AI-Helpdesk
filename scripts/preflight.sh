@@ -14,20 +14,39 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
 hint() { printf '        -> %s\n' "$1"; }
 
 echo "=== 1. GPU ==="
+# Load .env early: GPU_ID and the Ollama settings come from there.
+if [ -f .env ]; then set -a; . ./.env 2>/dev/null; set +a; fi
+GPU_ID="${GPU_ID:-0}"
+
 if command -v nvidia-smi >/dev/null 2>&1; then
-  gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-  total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
-  used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
+  count=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+  if [ "$count" -gt 1 ]; then
+    echo "  note  $count GPUs present; this agent is pinned to GPU_ID=$GPU_ID"
+    nvidia-smi --query-gpu=index,name,memory.used,memory.total \
+      --format=csv,noheader,nounits |
+      awk -F', ' '{printf "        GPU %s  %-12s %6s / %6s MiB used\n", $1, $2, $3, $4}'
+  fi
+  # Query the configured card specifically, not just the first one.
+  if ! stats=$(nvidia-smi --id="$GPU_ID" \
+        --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null); then
+    bad "GPU_ID=$GPU_ID does not exist on this host"
+    hint "pick one from the list above and set GPU_ID in .env"
+    stats="unknown, 0, 0"
+  fi
+  gpu_name=$(echo "$stats" | cut -d',' -f1 | xargs)
+  total=$(echo "$stats" | cut -d',' -f2 | xargs)
+  used=$(echo "$stats" | cut -d',' -f3 | xargs)
   free=$((total - used))
-  ok "GPU: $gpu_name"
+  ok "GPU $GPU_ID: $gpu_name"
   echo "        ${total} MiB total, ${used} MiB in use, ${free} MiB free"
-  if   [ "$free" -ge 20000 ]; then ok  "enough VRAM for any profile (22gb-max included)"
-  elif [ "$free" -ge 15000 ]; then ok  "enough VRAM for 16gb-quality.yaml (recommended)"
-  elif [ "$free" -ge 11000 ]; then warn "only enough for 12gb-shared.yaml"
-       hint "free VRAM, or: cp config/profiles/12gb-shared.yaml config/config.yaml"
-  else bad "under 11 GiB free -- not enough for any profile"
-       hint "find what holds VRAM: nvidia-smi  (often an idle ollama model)"
-       hint "unload ollama models: ollama stop <model>"
+  # The LLM also lives here when Ollama is pinned to this card, so budget ~5 GB
+  # on top of the container's own ASR + TTS.
+  if   [ "$free" -ge 16000 ]; then ok  "enough VRAM on GPU $GPU_ID for the agent plus a 7B model"
+  elif [ "$free" -ge 11000 ]; then warn "tight: use 12gb-shared.yaml, or a smaller LLM"
+       hint "cp config/profiles/12gb-shared.yaml config/config.yaml"
+  else bad "only ${free} MiB free on GPU $GPU_ID -- not enough"
+       hint "pick a freer card (GPU_ID in .env), or free VRAM there"
+       hint "what is holding it: nvidia-smi --id=$GPU_ID"
   fi
   driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
   major=${driver%%.*}
@@ -47,9 +66,9 @@ if command -v docker >/dev/null 2>&1; then
     bad "docker compose plugin missing"; hint "apt install docker-compose-plugin"
   fi
   # The GPU must be visible inside a container, not just on the host.
-  if docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 \
+  if docker run --rm --gpus "device=$GPU_ID" nvidia/cuda:12.8.1-base-ubuntu22.04 \
        nvidia-smi -L >/tmp/preflight-gpu.log 2>&1; then
-    ok "containers can see the GPU: $(head -1 /tmp/preflight-gpu.log)"
+    ok "containers can use GPU $GPU_ID: $(head -1 /tmp/preflight-gpu.log)"
   else
     bad "containers cannot use the GPU (NVIDIA Container Toolkit)"
     hint "install nvidia-container-toolkit, then: systemctl restart docker"
@@ -60,30 +79,54 @@ else
 fi
 
 echo
-echo "=== 3. Ollama ==="
-OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
-if curl -sf --max-time 5 "$OLLAMA_URL/api/tags" -o /tmp/preflight-ollama.json; then
-  ok "reachable at $OLLAMA_URL"
-  LLM_MODEL="${LLM_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
-  if grep -q "\"${LLM_MODEL}\"" /tmp/preflight-ollama.json; then
-    ok "model present: $LLM_MODEL"
+echo "=== 3. Language model ==="
+LLM_BACKEND=$(grep -m1 '^  backend:' config/config.yaml 2>/dev/null | awk '{print $2}')
+LLM_BACKEND="${LLM_BACKEND:-ollama}"
+if [ "$LLM_BACKEND" = "ollama" ]; then
+  OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+  if curl -sf --max-time 5 "$OLLAMA_URL/api/tags" -o /tmp/preflight-ollama.json; then
+    ok "Ollama reachable at $OLLAMA_URL"
+    LLM_MODEL="${LLM_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
+    if grep -q "\"${LLM_MODEL}\"" /tmp/preflight-ollama.json; then
+      ok "model present: $LLM_MODEL"
+    else
+      bad "model missing: $LLM_MODEL"
+      hint "ollama pull $LLM_MODEL"
+      echo "        installed: $(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' /tmp/preflight-ollama.json | head -8 | tr '\n' ' ')"
+    fi
+    # On a multi-GPU host Ollama must be pinned to the same free card, or it
+    # takes GPU 0 and fails there.
+    if [ "${count:-1}" -gt 1 ]; then
+      pinned=$(systemctl show ollama -p Environment 2>/dev/null | grep -o 'CUDA_VISIBLE_DEVICES=[^ ]*' | cut -d= -f2)
+      if [ -z "$pinned" ]; then
+        bad "Ollama is not pinned to a GPU (CUDA_VISIBLE_DEVICES unset)"
+        hint "it will use GPU 0 and fail if that card is full -- see the README"
+      elif [ "$pinned" = "$GPU_ID" ]; then
+        ok "Ollama pinned to GPU $pinned, same as the container"
+      else
+        warn "Ollama uses GPU $pinned, the container uses GPU $GPU_ID"
+        hint "that works, but then both cards need free VRAM"
+      fi
+    fi
   else
-    bad "model missing: $LLM_MODEL"
-    hint "ollama pull $LLM_MODEL"
-    echo "        installed: $(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' /tmp/preflight-ollama.json | head -8 | tr '\n' ' ')"
+    bad "cannot reach Ollama at $OLLAMA_URL"
+    hint "systemctl status ollama"
+    hint "with network_mode: host the container uses this same address"
   fi
 else
-  bad "cannot reach Ollama at $OLLAMA_URL"
-  hint "systemctl status ollama"
-  hint "with network_mode: host the container uses this same address"
+  BASE_URL=$(grep -m1 '^  base_url:' config/config.yaml | awk '{print $2}' | tr -d '"')
+  if curl -sf --max-time 5 "${BASE_URL}/models" -o /tmp/preflight-llm.json; then
+    ok "inference server reachable at $BASE_URL"
+    echo "        serves: $(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' /tmp/preflight-llm.json | head -4 | tr '\n' ' ')"
+  else
+    bad "cannot reach the inference server at $BASE_URL"
+  fi
 fi
 
 echo
 echo "=== 4. Configuration ==="
 if [ -f .env ]; then
   ok ".env exists"
-  # shellcheck disable=SC1091
-  set -a; . ./.env 2>/dev/null; set +a
   for var in SIP_USERNAME SIP_PASSWORD SIP_SERVER_HOST TRANSFER_NUMBER; do
     value="${!var:-}"
     case "$value" in

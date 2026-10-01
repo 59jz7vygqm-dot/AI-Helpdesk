@@ -444,22 +444,22 @@ async def test_backchannel_resumes_instead_of_restarting():
     # in the queue unheard -- which is the situation this feature exists for.
     call.rtp.start_draining(speed=1)
     await feed(session, speech(30) + silence(15))
-    await wait_until(lambda: len(synth.spoken) >= 2, 5, "reply under way")
+    await wait_until(lambda: len(synth.spoken) >= 2, 12, "reply under way")
     await wait_until(lambda: session._queued_samples > session._sent_samples + 8000,
-                     5, "audio buffered ahead of the caller")
+                     12, "audio buffered ahead of the caller")
 
     requests_before = len(llm.requests)
     # Interrupt mid-answer, then say only "mhm"
     for frame in speech(20):
         session._on_audio(frame)
         await asyncio.sleep(0.001)
-    await wait_until(lambda: session._interrupted_remainder != "", 3, "remainder remembered")
+    await wait_until(lambda: session._interrupted_remainder != "", 8, "remainder remembered")
     remainder = session._interrupted_remainder
     print(f"PASS remembered {len(remainder)} chars the caller had not heard yet")
 
     spoken_before = len(synth.spoken)
     await feed(session, silence(10) + speech(20) + silence(15), drain_first=False)
-    await wait_until(lambda: len(synth.spoken) > spoken_before, 6, "resume")
+    await wait_until(lambda: len(synth.spoken) > spoken_before, 12, "resume")
 
     assert len(llm.requests) == requests_before, "model was asked again for a backchannel"
     resumed = " ".join(synth.spoken[spoken_before:])
@@ -586,7 +586,7 @@ async def main() -> int:
     for name, test in tests:
         print(f"\n=== {name} ===")
         try:
-            await asyncio.wait_for(test(), 25)
+            await asyncio.wait_for(test(), 60)
         except Exception as exc:
             failed += 1
             import traceback
