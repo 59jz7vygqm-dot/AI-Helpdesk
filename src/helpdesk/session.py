@@ -116,6 +116,12 @@ class CallSession:
         self.silence_hangup_after_ms = int(dialog.get("silence_hangup_after_ms", 20000))
         self.max_call_seconds = int(dialog.get("max_call_seconds", 900))
         self.speculative_asr = bool(vad_config.get("speculative_asr", True))
+        #: answer as soon as the running transcript looks like a complete
+        #: sentence, rather than waiting out end_silence_ms. This is where the
+        #: remaining latency is: the hangover is paid on every single turn.
+        self.semantic_endpointing = bool(vad_config.get("semantic_endpointing", True))
+        self.semantic_min_words = int(vad_config.get("semantic_min_words", 3))
+        self._speculative_result = None
 
         vad = build_vad(vad_config.get("backend", "auto"), int(vad_config.get("aggressiveness", 2)))
         self.endpointer = Endpointer(
@@ -425,17 +431,52 @@ class CallSession:
             return
         # Recognise what we have now, betting the caller is finished.  If they
         # resume, the result is discarded; if not, the hangover was free.
+        self._speculative_result = None
         self._speculative = asyncio.ensure_future(self._recognize(audio))
+
+    def _looks_complete(self, text: str) -> bool:
+        """Whether a transcript reads as a finished utterance.
+
+        Conservative: a sentence-final mark plus enough words. Cutting someone
+        off mid-thought is worse than the 100 ms this saves.
+        """
+        stripped = (text or "").strip()
+        if len(stripped.split()) < self.semantic_min_words:
+            return False
+        return stripped.endswith((".", "?", "!", "…"))
+
+    def _speculative_is_complete(self) -> bool:
+        """True when the pending speculative transcript is already a full turn."""
+        task = self._speculative
+        if task is None or not task.done() or task.cancelled():
+            return False
+        try:
+            result = task.result()
+        except Exception:
+            return False
+        if result is None or result.is_empty:
+            return False
+        self._speculative_result = result
+        return self._looks_complete(result.text)
 
     def _drop_speculative(self) -> None:
         if self._speculative is not None:
             self._speculative.cancel()
             self._speculative = None
+        self._speculative_result = None
 
     async def _finish_recognition(self, metrics: TurnMetrics):
         audio = self.endpointer.utterance(trim_trailing_silence=True)
         metrics.utterance_ms = int(audio.size * 1000 / TELEPHONY_RATE)
         started = time.monotonic()
+
+        if self._speculative_result is not None:
+            result = self._speculative_result
+            self._speculative_result = None
+            self._speculative = None
+            metrics.asr_ms = int((time.monotonic() - started) * 1000)
+            metrics.asr_speculative = True
+            return result
 
         speculative = self._speculative
         self._speculative = None
@@ -634,9 +675,23 @@ class CallSession:
         if event is VadEvent.SPEECH_START:
             self._silence_prompted = False
             self._drop_speculative()
-        elif event is VadEvent.SPECULATIVE_END:
+            return
+        if event is VadEvent.SPECULATIVE_END:
             self._start_speculative()
-        elif event in (VadEvent.SPEECH_END, VadEvent.MAX_DURATION):
+            return
+        if event in (VadEvent.SPEECH_END, VadEvent.MAX_DURATION):
+            self._turn_task = asyncio.ensure_future(self._run_turn())
+            return
+
+        # Still in the hangover: if what the caller said already reads as a
+        # finished sentence, there is nothing to wait for.
+        if (
+            self.semantic_endpointing
+            and self.endpointer.silence_run > 0
+            and self._speculative_is_complete()
+        ):
+            log.debug("semantic endpoint: %r", (self._speculative_result.text or "")[:60])
+            self.endpointer.in_speech = False
             self._turn_task = asyncio.ensure_future(self._run_turn())
 
     def _cancel_turn(self) -> None:

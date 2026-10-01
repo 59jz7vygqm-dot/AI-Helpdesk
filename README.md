@@ -392,6 +392,46 @@ bevor das erste Wort gesprochen werden kann.
 
 ---
 
+## Zwei Betriebsarten
+
+```yaml
+dialog:
+  mode: helpdesk      # oder: assistant
+```
+
+**`helpdesk`** (Standard): antwortet nur aus der Wissensdatenbank, leitet sonst
+weiter. Das ist das Verhalten für den echten Einsatz — es sagt lieber „weiß ich
+nicht" als etwas zu erfinden.
+
+**`assistant`**: redet auch frei. Smalltalk („Wie geht es dir?"), allgemeine
+Fragen, Scherze. Nutzt die Wissensdatenbank, wenn sie etwas hergibt, antwortet
+sonst aus allgemeinem Wissen. Weitergeleitet wird nur noch, wenn der Anrufer
+ausdrücklich einen Menschen will. Das ist der Modus für eine Demo, bei der
+Kollegen einfach mal anrufen und mit dem Modell reden sollen.
+
+Firmenspezifische Angaben — Preise, Termine, Rufnummern, Zuständigkeiten — bleiben
+in beiden Modi an die Wissensdatenbank gebunden.
+
+## Stimme auswählen
+
+Welche Stimme am Telefon gut klingt, lässt sich nicht aus dem Modellnamen ablesen.
+Alle verfügbaren laden und vergleichen:
+
+```bash
+VOICE="de_DE-thorsten-medium de_DE-thorsten-low de_DE-eva_k-x_low de_DE-kerstin-low de_DE-ramona-low" \
+  ./scripts/download_models.sh
+
+docker compose exec helpdesk python3 /app/scripts/compare_voices.py
+```
+
+Das schreibt pro Stimme eine WAV in `/tmp/voices` — in 8 kHz, also genau so wie
+der Anrufer sie hört — und zeigt den Realtime-Faktor jeder Stimme. Unter 0,15 ist
+unkritisch, darüber bremst die Stimme jede Antwort.
+
+Danach den Pfad in `config/config.yaml` unter `tts.piper.model_path` eintragen.
+`length_scale` leicht unter 1,0 (etwa 0,95) lässt die Stimme etwas lebendiger
+klingen und verkürzt die Audiodauer.
+
 ## Wenn das Gespräch sich falsch anfühlt
 
 Die Reihenfolge, in der es sich lohnt zu suchen — aus einem echten ersten Anruf
@@ -414,11 +454,11 @@ drehen, sondern der Wissensdatenbank einen Abschnitt zu dieser Frage zu geben.
 unpassender Treffer, aus dem improvisiert wird. 0,40 ist der Startwert; wenn der
 Agent zu oft weiterleitet, in 0,05er-Schritten senken.
 
-**3. Füllwörter nutzen.** Ein Mensch sagt „einen Moment", bevor er nachdenkt —
-er geht nicht stumm. Das ist in `dialog.fillers` eingebaut: vier Varianten, beim
-Start vorgerendert (kosten also keine Zeit), gespielt sobald die Antwort länger
-als `filler_after_ms` braucht. Nie zweimal derselbe hintereinander, weil
-*das* mechanischer klingt als die Pause. Bei schnellen Antworten passiert nichts.
+**3. Füllwörter — standardmäßig aus.** `dialog.fillers` kann „einen Moment"
+einwerfen, während die Antwort entsteht. Das war sinnvoll, solange Antworten
+mehrere Sekunden brauchten; bei Antwortzeiten unter einer Sekunde unterbricht es
+den Fluss mehr als es die Pause glättet. Die Liste ist leer — füllen, wenn die
+Latenz bei dir doch hoch bleibt.
 
 **4. Wiederholungen.** Wenn der Agent dieselbe Antwort mehrfach gibt, ist das
 Gespräch für den Anrufer vorbei. Ähnliche Antworten werden jetzt erkannt: beim
@@ -444,8 +484,16 @@ Was tatsächlich wirkt, in der Reihenfolge der Wirkung:
 | `tts.piper.threads` auf die Kernzahl | Synthese 2–3× schneller auf CPU | nichts |
 | `medium`-Stimme statt `high` | ~3× schnellere Synthese | bei 8 kHz nicht hörbar |
 | kurzer Prompt + `top_k: 2` | weniger Prefill → `llm_ttft` runter | weniger Kontext pro Antwort |
+| `vad.semantic_endpointing` | antwortet beim erkannten Satzende statt nach Ablauf der Pause | spart die halbe Nachlaufzeit |
 | `tts.first_chunk_min_chars: 14` | Sprechbeginn nach Teilsatz statt Satz | minimal andere Betonung |
 | `vad.end_silence_ms: 320` | 100 ms weniger Wartezeit pro Turn | schneidet eher mal jemanden ab |
+
+**Zum „Live-Processing":** Die Erkennung läuft bereits, während gesprochen wird —
+`asr 0*` im Log heißt genau das: das Transkript lag fertig vor, als der Anrufer
+verstummte. Zusätzlich wird jetzt geprüft, ob dieses laufende Transkript schon
+einen vollständigen Satz zeigt (Punkt oder Fragezeichen, mindestens drei Wörter).
+Wenn ja, wird nicht mehr auf `end_silence_ms` gewartet, sondern sofort geantwortet.
+Im Test: 29 ms statt 2.000 ms Nachlaufzeit.
 
 **Zum Prefill, weil es leicht übersehen wird:** Das Modell liest bei *jedem* Turn
 den System-Prompt, die Gesprächshistorie und die gefundenen Wissenspassagen neu.

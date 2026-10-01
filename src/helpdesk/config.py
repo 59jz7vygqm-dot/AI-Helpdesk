@@ -170,8 +170,13 @@ DEFAULTS: Dict[str, Any] = {
         "start_frames": 3,
         "max_utterance_ms": 20000,
         "pre_roll_ms": 300,
-        "barge_in_ms": 260,
+        "barge_in_ms": 200,
         "speculative_asr": True,
+        # Answer as soon as the running transcript reads as a finished sentence,
+        # instead of waiting out end_silence_ms. The hangover is paid on every
+        # turn, so this is the last structural piece of the response time.
+        "semantic_endpointing": True,
+        "semantic_min_words": 3,
         "echo_guard": True,
         "echo_attenuation_db": 12.0,
         "echo_correlation": 0.72,
@@ -180,6 +185,9 @@ DEFAULTS: Dict[str, Any] = {
     "dialog": {
         "company": "unserem Unternehmen",
         "agent_name": "Alex",
+        # helpdesk  = answers only from the knowledge base, hands over otherwise
+        # assistant = also chats freely; for demos and general questions
+        "mode": "helpdesk",
         "greeting": "Guten Tag, hier ist der automatische Service von unserem Unternehmen. Wie kann ich Ihnen helfen?",
         "transfer_announcement": "Einen Moment bitte, ich verbinde Sie mit einem Kollegen.",
         "transfer_failed": "Ich kann Sie im Moment leider nicht verbinden. Bitte versuchen Sie es später noch einmal. Auf Wiederhören.",
@@ -187,16 +195,11 @@ DEFAULTS: Dict[str, Any] = {
         "not_understood": "Entschuldigung, das habe ich nicht verstanden. Können Sie das bitte wiederholen?",
         "still_there": "Sind Sie noch da?",
         "thinking": "",
-        # Played when the answer is not ready within filler_after_ms. Several
-        # variants, because hearing the identical phrase every turn is worse than
-        # the pause it covers. Pre-rendered at startup, so they cost nothing.
-        "fillers": [
-            "Einen Moment.",
-            "Einen Augenblick bitte.",
-            "Ich schaue kurz nach.",
-            "Moment, ich prüfe das.",
-        ],
-        "filler_after_ms": 700,
+        # Off by default. They were added to cover a multi-second pause; once
+        # answers arrive in well under a second they interrupt the flow instead of
+        # smoothing it. Fill the list to bring them back.
+        "fillers": [],
+        "filler_after_ms": 900,
         "transfer_number": "",
         "transfer_method": "auto",
         "transfer_dtmf_feature_code": "##",
