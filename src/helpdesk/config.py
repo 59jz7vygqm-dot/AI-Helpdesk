@@ -43,7 +43,9 @@ DEFAULTS: Dict[str, Any] = {
         "language": "de",
         "beam_size": 1,
         "download_root": "/models/whisper",
-        "initial_prompt": "",
+        # Biases recognition towards your vocabulary. Worth filling in: it is the
+        # difference between "Drucker druckt nicht" and "Drucker trug nicht".
+        "initial_prompt": "Drucker, Papierstau, Fehlercode, Toner, VPN, Kennung, Passwort, Rechner, Bildschirm, Netzwerk.",
         "min_avg_logprob": -1.1,
         "max_no_speech_prob": 0.75,
         "cpu_threads": 4,
@@ -62,9 +64,9 @@ DEFAULTS: Dict[str, Any] = {
         # Reasoning models would spend seconds thinking before the first word.
         "think": False,
         "options": {
-            "temperature": 0.3,
+            "temperature": 0.2,
             "top_p": 0.9,
-            "num_predict": 160,
+            "num_predict": 110,
             "num_ctx": 4096,
             # Stop as soon as the model starts a second speaker turn.
             "stop": ["\nANRUFER", "\nAnrufer:", "\nUser:"],
@@ -90,9 +92,14 @@ DEFAULTS: Dict[str, Any] = {
             "streaming": True,
         },
         "piper": {
-            "model_path": "/models/piper/de_DE-thorsten-high.onnx",
+            # medium, not high: the call is 8 kHz, so the extra bandwidth is
+            # discarded while the synthesis cost is not.
+            "model_path": "/models/piper/de_DE-thorsten-medium.onnx",
             "config_path": "",
             "length_scale": 1.0,
+            # Synthesis is the dominant cost per answer; give it real cores.
+            # 0 lets onnxruntime decide, which is usually too conservative.
+            "threads": 8,
             "noise_scale": 0.667,
             "noise_w": 0.8,
             "use_cuda": False,
@@ -117,7 +124,9 @@ DEFAULTS: Dict[str, Any] = {
             "speed": 1.0,
         },
         "cache_dir": "/models/phrase-cache",
-        "first_chunk_min_chars": 24,
+        # Deliberately small: the first chunk decides when the caller hears
+        # anything, and a clause of 15 characters already sounds natural.
+        "first_chunk_min_chars": 14,
         "min_chunk_chars": 60,
         "max_chunk_chars": 220,
     },
@@ -125,12 +134,18 @@ DEFAULTS: Dict[str, Any] = {
         "enabled": True,
         "directory": "/app/knowledge",
         "cache_path": "/models/kb-index.npz",
-        "top_k": 3,
+        # Every retrieved chunk is re-read by the model on every single turn, so
+        # this trades directly against time-to-first-token. Two good passages
+        # answer a helpdesk question; a third mostly adds prefill and distraction.
+        "top_k": 2,
         "max_chars": 900,
         "overlap_chars": 120,
-        "context_chars": 1800,
+        "context_chars": 1100,
         "dense_weight": 0.72,
-        "min_score": 0.28,
+        # Raised after a live call: at 0.28 a loosely related passage was passed
+        # in as context and the model improvised instructions from it. Better to
+        # have no context and hand over.
+        "min_score": 0.40,
         "embeddings": {
             "backend": "ollama",
             "model": "bge-m3",
@@ -138,13 +153,19 @@ DEFAULTS: Dict[str, Any] = {
             "query_prefix": "",
             "document_prefix": "",
             "cache_dir": "/models/fastembed",
-            "threads": 4,
+            # Synthesis is the dominant cost per answer; give it real cores.
+            # 0 lets onnxruntime decide, which is usually too conservative.
+            "threads": 8,
         },
     },
     "vad": {
         "backend": "auto",
-        "aggressiveness": 2,
-        "end_silence_ms": 420,
+        # 3 (strictest) on a telephony line: at 2, steady line noise kept the
+        # utterance open for seconds after the caller stopped.
+        "aggressiveness": 3,
+        # The caller waits this out on every single turn, so it is the one number
+        # that is felt directly. 320 ms still tolerates a breath mid-sentence.
+        "end_silence_ms": 320,
         "speculative_silence_ms": 220,
         "start_frames": 3,
         "max_utterance_ms": 20000,
@@ -166,18 +187,33 @@ DEFAULTS: Dict[str, Any] = {
         "not_understood": "Entschuldigung, das habe ich nicht verstanden. Können Sie das bitte wiederholen?",
         "still_there": "Sind Sie noch da?",
         "thinking": "",
+        # Played when the answer is not ready within filler_after_ms. Several
+        # variants, because hearing the identical phrase every turn is worse than
+        # the pause it covers. Pre-rendered at startup, so they cost nothing.
+        "fillers": [
+            "Einen Moment.",
+            "Einen Augenblick bitte.",
+            "Ich schaue kurz nach.",
+            "Moment, ich prüfe das.",
+        ],
+        "filler_after_ms": 700,
         "transfer_number": "",
         "transfer_method": "auto",
         "transfer_dtmf_feature_code": "##",
         "transfer_dtmf_terminator": "",
         "transfer_dtmf_delay_ms": 700,
-        "max_sentences": 3,
-        "history_turns": 10,
+        "max_sentences": 2,
+        # Enough for a phone call to stay coherent without the prompt growing
+        # through a long conversation.
+        "history_turns": 6,
         "extra_instructions": "",
         "silence_prompt_after_ms": 7000,
         "silence_hangup_after_ms": 20000,
         "max_call_seconds": 900,
         "max_misunderstood": 2,
+        # "Vielen Dank" means goodbye, not "transfer me". Handled in code because
+        # the model kept reading it as a request it could not fulfil.
+        "farewell_ends_call": True,
         "answer_delay_ms": 0,
         "ring_before_answer": True,
     },

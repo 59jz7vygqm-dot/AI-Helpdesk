@@ -68,6 +68,7 @@ class HelpdeskApplication:
             not_understood=dialog.get("not_understood", ""),
             still_there=dialog.get("still_there", ""),
             thinking=dialog.get("thinking", "") or "",
+            fillers=[f for f in (dialog.get("fillers") or []) if f],
         )
 
         llm_config = config["llm"]
@@ -114,6 +115,16 @@ class HelpdeskApplication:
             cpu_threads=int(asr_config.get("cpu_threads", 4)),
         )
 
+        # onnxruntime reads its thread limits when it is first imported, and the
+        # TTS backends import it lazily, so this has to happen before the
+        # synthesizer is constructed. Piper on CPU is otherwise capped at whatever
+        # OMP_NUM_THREADS happened to be, which on a big host leaves cores idle.
+        piper_threads = int((config["tts"].get("piper") or {}).get("threads", 0))
+        if piper_threads > 0:
+            os.environ["OMP_NUM_THREADS"] = str(piper_threads)
+            os.environ["ORT_INTRA_OP_NUM_THREADS"] = str(piper_threads)
+            log.info("synthesis thread limit set to %d", piper_threads)
+
         self.synthesizer = build_synthesizer(config["tts"])
         # Fail fast on a voice that cannot load: this is a pure config error and
         # must not cost a multi-minute model download before it surfaces.
@@ -144,6 +155,18 @@ class HelpdeskApplication:
                 min_score=float(knowledge_config.get("min_score", 0.28)),
             )
 
+        self.ua = SipUserAgent(
+            self._build_account(),
+            self._handle_call,
+            max_concurrent_calls=int(config["sip"].get("max_concurrent_calls", 1)),
+        )
+        # Claim the SIP port first: it costs nothing and failing here after a
+        # minute of model loading wastes the whole warmup.
+        try:
+            await self.ua.bind()
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
+
         # Warm everything before the first call: a cold model load during a live
         # call is the difference between 600 ms and 30 seconds.
         log.info("warming up ...")
@@ -153,11 +176,19 @@ class HelpdeskApplication:
         log.info("LLM warm (%d ms for a short completion)", int(llm_ms * 1000))
         if self.kb is not None:
             await self.kb.build()
+            # Loading the index from cache skips the embedder, which would then
+            # load during the caller's first question and cost seconds there.
+            try:
+                await self.kb.search("Testfrage zum Aufwaermen", top_k=1)
+                log.info("knowledge retrieval warm")
+            except Exception:
+                log.warning("could not warm up knowledge retrieval", exc_info=True)
         await self.phrases.prepare_all(self.texts.fixed_phrases())
         log.info("warmup complete in %.1fs", time.monotonic() - started)
 
-        sip_config = config["sip"]
-        account = SipAccount(
+    def _build_account(self) -> SipAccount:
+        sip_config = self.config["sip"]
+        return SipAccount(
             username=str(sip_config["username"]),
             password=str(sip_config["password"]),
             domain=str(sip_config.get("domain") or sip_config["server_host"]),
@@ -175,11 +206,6 @@ class HelpdeskApplication:
             ),
             codec_preference=list(sip_config.get("codec_preference") or ["PCMA", "PCMU"]),
             trace=bool(sip_config.get("trace", False)),
-        )
-        self.ua = SipUserAgent(
-            account,
-            self._handle_call,
-            max_concurrent_calls=int(sip_config.get("max_concurrent_calls", 1)),
         )
 
     # ---- per call ------------------------------------------------------

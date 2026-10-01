@@ -39,34 +39,33 @@ class Action(enum.Enum):
 
 
 DEFAULT_SYSTEM_PROMPT = """\
-Du bist {agent_name}, die telefonische Serviceassistenz von {company}.
-Du sprichst mit einem Anrufer am Telefon. Antworte ausschließlich auf Deutsch.
+Du bist {agent_name} vom telefonischen Service von {company}. Antworte auf Deutsch.
 
-So sprichst du:
-- Kurz und natürlich, wie am Telefon. Ein bis zwei Sätze, maximal {max_sentences}.
-- Keine Aufzählungen, keine Listen, keine Sonderzeichen, keine Emojis, kein Markdown.
-- Keine Links und keine E-Mail-Adressen vorlesen.
-- Zahlen und Uhrzeiten ausgeschrieben, wie man sie sagt.
-- Stelle immer nur eine Frage auf einmal.
-- Wiederhole dich nicht und fasse nicht ständig zusammen.
-- Wenn der Anrufer dich unterbricht, gehe sofort auf das Neue ein.
+Sprich wie am Telefon: höchstens {max_sentences} Sätze, lieber einer. Nur der
+nächste Schritt, nicht die ganze Anleitung. Eine Frage auf einmal. Keine Listen,
+Sonderzeichen oder Floskeln wie "Haben Sie noch Fragen?". Zahlen ausgeschrieben.
 
-Deine Aufgabe:
-- Beantworte Fragen zu {company} ausschließlich mit den Informationen im Abschnitt WISSEN.
-- Stelle kurze Rückfragen, wenn dir eine Angabe fehlt, um weiterzuhelfen.
-- Erfinde nichts. Keine Preise, Termine, Namen oder Zusagen, die nicht im WISSEN stehen.
+Frei formulieren darfst du die Gesprächsführung und Allgemeinwissen: fragt der
+Anrufer, was ein Netzwerkkabel oder ein Neustart ist, erkläre es in einem Satz.
 
-Wenn du nicht helfen kannst, leite weiter:
-- Schreibe dann {transfer_marker} an das Ende deiner Antwort.
-- Sage davor in einem Satz, dass du verbindest, zum Beispiel: "Einen Moment, ich verbinde Sie mit einem Kollegen."
-- Leite weiter, wenn: die Information nicht im WISSEN steht, der Anrufer ausdrücklich einen Menschen will,
-  es um Kündigung, Reklamation, Rechtliches oder eine Eskalation geht, oder du den Anrufer zweimal nicht verstanden hast.
-- Verspreche niemals einen Rückruf und nenne niemals die Zielrufnummer.
+Nur aus dem Abschnitt WISSEN kommen Angaben, die dieses Unternehmen betreffen:
+Preise, Zeiten, Zuständigkeiten, Rufnummern und die Schritte zu einem Gerät.
+Steht dort nichts dazu, erfinde nichts - auch keine Bestellnummern oder
+Formulare, von denen niemand gesprochen hat.
 
-Wenn der Anrufer sich verabschiedet oder das Gespräch beenden will:
-- Verabschiede dich in einem kurzen Satz und schreibe {hangup_marker} an das Ende.
+Wiederhole nie eine Frage, die du schon gestellt hast, und nie einen Schritt, der
+laut Anrufer nicht geholfen hat. Geh auf das ein, was er zuletzt gesagt hat.
 
-Die Marker sind Steuerzeichen. Sage sie nicht vor und erkläre sie nicht.
+{transfer_marker} an das Ende, wenn du nicht weiterhilfst: wenn das WISSEN die
+Frage nicht beantwortet, der Anrufer einen Menschen will, es um Kündigung,
+Reklamation oder Rechtliches geht, oder du zweimal nicht verstanden hast. Sage
+davor einen Satz wie "Einen Moment, ich verbinde Sie." Nenne nie die Zielnummer
+und versprich keinen Rückruf.
+
+{hangup_marker} an das Ende, wenn der Anrufer sich verabschiedet - mit einem
+kurzen Abschiedssatz davor.
+
+Die Marker sind Steuerzeichen: nie vorlesen, nie erklären.
 """
 
 NO_KNOWLEDGE_NOTE = "(Keine passenden Informationen gefunden.)"
@@ -85,6 +84,21 @@ class AgentReply:
     first_token_ms: int = 0
     total_ms: int = 0
     retrieved: List[str] = field(default_factory=list)
+    #: how many times in a row this answer has essentially repeated the last one
+    repeat_count: int = 0
+
+
+def _similarity(a: str, b: str) -> float:
+    """Rough similarity of two answers, ignoring wording and punctuation."""
+    import difflib  # noqa: PLC0415
+
+    def norm(text: str) -> str:
+        return " ".join(re.sub(r"[^\w\säöüß]", " ", text.lower(), flags=re.UNICODE).split())
+
+    left, right = norm(a), norm(b)
+    if not left or not right:
+        return 0.0
+    return difflib.SequenceMatcher(None, left, right).ratio()
 
 
 class MarkerFilter:
@@ -145,7 +159,7 @@ class HelpdeskAgent:
         company: str = "unserem Unternehmen",
         agent_name: str = "Alex",
         system_prompt: Optional[str] = None,
-        max_sentences: int = 3,
+        max_sentences: int = 2,
         history_turns: int = 10,
         top_k: int = 3,
         context_chars: int = 1800,
@@ -166,10 +180,16 @@ class HelpdeskAgent:
         self.history: List[Turn] = []
         #: consecutive turns we failed to understand; drives the hand-off rule
         self.misunderstood = 0
+        #: consecutive near-identical answers. A caller hearing the same sentence
+        #: three times has been abandoned, whatever the model thinks it is doing.
+        self.repeated = 0
+        #: similarity above which two answers count as the same
+        self.repeat_threshold = 0.82
 
     def reset(self) -> None:
         self.history.clear()
         self.misunderstood = 0
+        self.repeated = 0
 
     def system_prompt(self) -> str:
         prompt = self.system_prompt_template.format(
@@ -188,12 +208,19 @@ class HelpdeskAgent:
         for turn in self.history[-self.history_turns :]:
             messages.append({"role": turn.role, "content": turn.content})
         knowledge = context.strip() or NO_KNOWLEDGE_NOTE
-        messages.append(
-            {
-                "role": "user",
-                "content": f"WISSEN:\n{knowledge}\n\nANRUFER SAGT:\n{user_text}",
-            }
-        )
+        parts = [f"WISSEN:\n{knowledge}"]
+        if self.repeated:
+            previous = next(
+                (t.content for t in reversed(self.history) if t.role == "assistant"), ""
+            )
+            parts.append(
+                "HINWEIS: Du hast gerade gesagt: \"" + previous + "\"\n"
+                "Der Anrufer kommt damit nicht weiter. Sage es NICHT noch einmal "
+                "und stelle keine Frage, die du schon gestellt hast. Beantworte, "
+                "was er wissen will, oder sage, dass du nicht weiterhelfen kannst."
+            )
+        parts.append(f"ANRUFER SAGT:\n{user_text}")
+        messages.append({"role": "user", "content": "\n\n".join(parts)})
         return messages
 
     async def retrieve(self, query: str) -> Tuple[str, List[str]]:
@@ -243,12 +270,26 @@ class HelpdeskAgent:
             yield tail
 
         text = re.sub(r"\s{2,}", " ", "".join(spoken)).strip()
+
+        previous = next(
+            (t.content for t in reversed(self.history) if t.role == "assistant"), ""
+        )
+        if text and previous and _similarity(text, previous) >= self.repeat_threshold:
+            self.repeated += 1
+            log.info(
+                "answer repeats the previous one (%d in a row): %r",
+                self.repeated, text[:70],
+            )
+        else:
+            self.repeated = 0
+
         self.last_reply = AgentReply(
             text=text,
             action=marker_filter.action,
             first_token_ms=first_token_ms,
             total_ms=int((time.monotonic() - started) * 1000),
             retrieved=retrieved,
+            repeat_count=self.repeated,
         )
         self.history.append(Turn(role="user", content=user_text))
         self.history.append(Turn(role="assistant", content=text or "(keine Antwort)"))

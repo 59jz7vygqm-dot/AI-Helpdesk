@@ -268,10 +268,21 @@ echo "=== 5. Network / SIP ==="
 BIND_PORT=$(grep -m1 '^  bind_port:' config/config.yaml 2>/dev/null | tr -dc '0-9')
 BIND_PORT="${BIND_PORT:-5060}"
 if command -v ss >/dev/null 2>&1; then
-  holder=$(ss -lunp 2>/dev/null | awk -v p=":$BIND_PORT" '$5 ~ p {print $NF; exit}')
-  if [ -n "$holder" ]; then
-    bad "UDP port $BIND_PORT is already in use by $holder"
-    hint "stop it, or set sip.bind_port to a free port (e.g. 5080)"
+  # The local address is field 4 in `ss -lun` output (State Recv-Q Send-Q Local
+  # Peer); matching field 5 silently passed a port that was taken. Process names
+  # need root, so note when they are missing rather than guessing.
+  port_line=$(ss -lunp 2>/dev/null | awk -v p="[:.]$BIND_PORT\$" '$4 ~ p {print; exit}')
+  if [ -n "$port_line" ]; then
+    holder=$(printf '%s' "$port_line" | sed -n 's/.*users:((\"\([^"]*\)\".*/\1/p')
+    if [ -n "$holder" ]; then
+      bad "UDP port $BIND_PORT is held by '$holder'"
+    else
+      bad "UDP port $BIND_PORT is already in use"
+      hint "re-run with sudo to see which process holds it"
+    fi
+    hint "set sip.bind_port in config/config.yaml to a free port, e.g. 5080"
+    hint "(the PBX learns the port from the Contact header, so nothing else changes)"
+    hint "only stop the other service if you know it is not in use"
   else
     ok "UDP port $BIND_PORT is free"
   fi

@@ -30,6 +30,7 @@ class PiperSynthesizer(Synthesizer):
         config_path: Optional[str] = None,
         speaker_id: Optional[int] = None,
         length_scale: float = 1.0,
+        threads: int = 0,
         noise_scale: float = 0.667,
         noise_w: float = 0.8,
         use_cuda: bool = False,
@@ -43,6 +44,7 @@ class PiperSynthesizer(Synthesizer):
         self.noise_w = noise_w
         self.use_cuda = use_cuda
         self.normalize_text = normalize_text
+        self.threads = threads
         self._voice = None
         self.sample_rate = 22050
         self._lock = asyncio.Lock()
@@ -56,7 +58,10 @@ class PiperSynthesizer(Synthesizer):
             raise FileNotFoundError(
                 f"Piper voice not found: {self.model_path}. Run scripts/download_models.sh"
             )
-        log.info("loading Piper voice %s (cuda=%s)", self.model_path, self.use_cuda)
+        log.info(
+            "loading Piper voice %s (cuda=%s, threads=%s)",
+            self.model_path, self.use_cuda, self.threads or "auto",
+        )
         self._voice = PiperVoice.load(
             self.model_path, config_path=self.config_path, use_cuda=self.use_cuda
         )
@@ -109,11 +114,15 @@ class PiperSynthesizer(Synthesizer):
             pcm = await loop.run_in_executor(None, self._synthesize_sync, prepared)
         if cancel is not None and cancel.is_set():
             return
-        log.debug(
-            "piper synthesized %d chars -> %d ms audio in %d ms",
-            len(prepared),
-            int(pcm.size * 1000 / max(self.sample_rate, 1)),
-            int((time.monotonic() - started) * 1000),
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        audio_ms = int(pcm.size * 1000 / max(self.sample_rate, 1))
+        rtf = elapsed_ms / audio_ms if audio_ms else 0.0
+        # A realtime factor above ~0.3 means synthesis is the latency bottleneck;
+        # the usual cause is a "high" voice where "medium" would do at 8 kHz.
+        log.log(
+            logging.INFO if rtf > 0.3 else logging.DEBUG,
+            "piper: %d chars -> %d ms audio in %d ms (rtf %.2f)",
+            len(prepared), audio_ms, elapsed_ms, rtf,
         )
         if pcm.size:
             yield SpeechChunk(pcm=pcm, sample_rate=self.sample_rate, final=True)

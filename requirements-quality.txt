@@ -18,3 +18,9 @@ soundfile>=0.12
 
 # CPU embeddings, so the knowledge base costs no VRAM
 fastembed>=0.4
+
+# Piper on the GPU. Synthesis is the largest share of the response time, and this
+# takes its realtime factor from roughly 0.3 to under 0.05 for a few hundred MB of
+# VRAM. Enable with tts.piper.use_cuda: true once installed.
+# Replaces the CPU build of onnxruntime, so it belongs in this profile only.
+onnxruntime-gpu>=1.19

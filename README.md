@@ -392,6 +392,73 @@ bevor das erste Wort gesprochen werden kann.
 
 ---
 
+## Wenn das Gespräch sich falsch anfühlt
+
+Die Reihenfolge, in der es sich lohnt zu suchen — aus einem echten ersten Anruf
+gelernt:
+
+**1. Steht in der Wissensdatenbank überhaupt eine Antwort?** Das ist mit Abstand
+der größte Hebel und wird meist zuletzt geprüft. Solange `knowledge/` die
+Beispieldateien enthält, kann der Agent auf echte Fragen nur daneben antworten.
+Die Logzeile `kb hits for '...'` zeigt, was er gefunden hat und wie gut es passt:
+
+```
+kb hits for 'Das Display ist schwarz': Der Drucker druckt nicht(0.50), Mein Bildschirm bleibt schwarz(0.49)
+```
+
+Zwei mittelmäßige Treffer, keiner beantwortet die Frage — und genau dann neigt
+ein Sprachmodell dazu, Schritte zu erfinden. Dagegen hilft nicht am Prompt zu
+drehen, sondern der Wissensdatenbank einen Abschnitt zu dieser Frage zu geben.
+
+**2. Ist `min_score` hoch genug?** Lieber kein Kontext und weiterleiten als ein
+unpassender Treffer, aus dem improvisiert wird. 0,40 ist der Startwert; wenn der
+Agent zu oft weiterleitet, in 0,05er-Schritten senken.
+
+**3. Füllwörter nutzen.** Ein Mensch sagt „einen Moment", bevor er nachdenkt —
+er geht nicht stumm. Das ist in `dialog.fillers` eingebaut: vier Varianten, beim
+Start vorgerendert (kosten also keine Zeit), gespielt sobald die Antwort länger
+als `filler_after_ms` braucht. Nie zweimal derselbe hintereinander, weil
+*das* mechanischer klingt als die Pause. Bei schnellen Antworten passiert nichts.
+
+**4. Wiederholungen.** Wenn der Agent dieselbe Antwort mehrfach gibt, ist das
+Gespräch für den Anrufer vorbei. Ähnliche Antworten werden jetzt erkannt: beim
+zweiten Mal bekommt das Modell seinen eigenen Satz mit dem Hinweis, ihn nicht zu
+wiederholen, beim dritten wird weitergeleitet.
+
+**5. Erst dann an der Latenz drehen.** Und dort zuerst die Sprachausgabe: Im Log
+steht pro Antwort, wohin die Zeit ging.
+
+```
+turn 1: response 5975 ms (asr 0*, kb 2862, llm_ttft 266, tts 5975)
+```
+
+Hier ist alles Synthese — das Sprachmodell braucht 266 ms, die Erkennung dank
+Vorausberechnung 0 ms. Die Eingabe zu streamen würde an solchen Zahlen nichts
+ändern.
+
+Was tatsächlich wirkt, in der Reihenfolge der Wirkung:
+
+| Maßnahme | Effekt | Kosten |
+|---|---|---|
+| `tts.piper.use_cuda: true` | Realtime-Faktor ~0,3 → unter 0,05 | ~300 MB VRAM, Image mit `TTS_PROFILE=quality` |
+| `tts.piper.threads` auf die Kernzahl | Synthese 2–3× schneller auf CPU | nichts |
+| `medium`-Stimme statt `high` | ~3× schnellere Synthese | bei 8 kHz nicht hörbar |
+| kurzer Prompt + `top_k: 2` | weniger Prefill → `llm_ttft` runter | weniger Kontext pro Antwort |
+| `tts.first_chunk_min_chars: 14` | Sprechbeginn nach Teilsatz statt Satz | minimal andere Betonung |
+| `vad.end_silence_ms: 320` | 100 ms weniger Wartezeit pro Turn | schneidet eher mal jemanden ab |
+
+**Zum Prefill, weil es leicht übersehen wird:** Das Modell liest bei *jedem* Turn
+den System-Prompt, die Gesprächshistorie und die gefundenen Wissenspassagen neu.
+Jede Regel, die man dem Prompt hinzufügt, und jeder zusätzliche `top_k`-Treffer
+kostet deshalb Zeit bei jeder einzelnen Antwort. Als in diesem Projekt der
+System-Prompt von 3.555 auf 1.403 Zeichen gekürzt und `top_k` von 3 auf 2 gesenkt
+wurde, fielen rund 700 Tokens Prefill pro Turn weg — vorher war `llm_ttft` auf
+380 ms gestiegen, allein durch zusätzliche Prompt-Regeln.
+
+Zum Nachrechnen: `response_ms` im Log ist die Zeit von „Anrufer verstummt" bis
+„erstes Audio raus". Die Sprechpause (`end_silence_ms`) kommt davor noch dazu —
+das ist die Pause, die der Anrufer wirklich erlebt.
+
 ## Konfiguration
 
 Alles in `config/config.yaml`, kommentiert. Jeder Wert ist per Umgebungsvariable
@@ -469,6 +536,37 @@ statt zu improvisieren. `temperature` in `llm.options` runter hilft zusätzlich.
 
 **Er versteht Fachbegriffe nicht** — `asr.initial_prompt` mit den eigenen
 Produktnamen und Fehlercodes füllen; das lenkt die Erkennung.
+
+**„nothing recognised" trotz Sprechen** — das Log nennt jetzt den Grund: die Dauer
+der Äußerung, den Pegel in dBFS und ob ein Transkript verworfen wurde. Typische
+Fälle:
+
+- *Pegel unter etwa −40 dBFS*: Die Leitung ist zu leise, oder die PBX schickt
+  kaum Audio. Prüfen, ob der Codec stimmt (im Log `answered … with PCMA`).
+- *`discarded transcript`*: Erkannt, aber als unsicher verworfen.
+  `asr.min_avg_logprob` auf `-1.4` lockern oder `asr.max_no_speech_prob` auf
+  `0.85`.
+- *Direkt nach der Begrüßung, ohne dass jemand sprach*: Die Sprachaktivitäts-
+  erkennung hat auf Leitungsrauschen angeschlagen. `vad.aggressiveness` auf 3,
+  oder `vad.start_frames` auf 5.
+
+**Die Antwort dauert, bis sie kommt** — im Log auf `rtf` achten. Über 0,3 heißt,
+die Sprachausgabe ist der Engpass; dann die `medium`- statt der `high`-Stimme
+nehmen (bei 8 kHz hörst du keinen Unterschied) und `tts.piper.threads` setzen.
+
+**Er redet zu lang** — `dialog.max_sentences: 2` und `llm.options.num_predict`
+runter. Am Telefon sind zwei Sätze plus Rückfrage besser als eine vollständige
+Anleitung.
+
+**Er erfindet Rückfragen** („Haben Sie eine Bestellnummer?", obwohl nirgends von
+Bestellungen die Rede war) — passiert, wenn die Wissensdatenbank zur Frage nichts
+hergibt. Der Prompt unterscheidet jetzt: Gesprächsführung darf er frei
+formulieren, Tatsachen über das Unternehmen nur aus dem WISSEN. Wenn es dort
+nichts gibt, soll er einmal gezielt nachfragen und dann weiterleiten.
+
+**Er leitet bei „Vielen Dank" weiter** — behoben: eine Verabschiedung beendet das
+Gespräch jetzt im Code, ohne Modellaufruf. Abschaltbar über
+`dialog.farewell_ends_call: false`.
 
 ---
 
