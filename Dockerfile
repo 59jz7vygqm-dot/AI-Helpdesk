@@ -5,7 +5,7 @@ ARG CUDA_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 FROM ${CUDA_IMAGE}
 
 # lite    = Piper only (CPU). Small image, builds in minutes, always works.
-# quality = adds Chatterbox on the GPU (~5 GB more image, pulls torch).
+# quality = adds Chatterbox and GPU synthesis (~5 GB more image, pulls torch).
 ARG TTS_PROFILE=lite
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -13,8 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app/src \
-    HF_HOME=/models/hf \
-    OMP_NUM_THREADS=4
+    HF_HOME=/models/hf
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-dev \

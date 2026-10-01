@@ -97,7 +97,9 @@ DEFAULTS: Dict[str, Any] = {
             "model_path": "/models/piper/de_DE-thorsten-medium.onnx",
             "config_path": "",
             "length_scale": 1.0,
-            "threads": 4,
+            # Synthesis is the dominant cost per answer; give it real cores.
+            # 0 lets onnxruntime decide, which is usually too conservative.
+            "threads": 8,
             "noise_scale": 0.667,
             "noise_w": 0.8,
             "use_cuda": False,
@@ -148,7 +150,9 @@ DEFAULTS: Dict[str, Any] = {
             "query_prefix": "",
             "document_prefix": "",
             "cache_dir": "/models/fastembed",
-            "threads": 4,
+            # Synthesis is the dominant cost per answer; give it real cores.
+            # 0 lets onnxruntime decide, which is usually too conservative.
+            "threads": 8,
         },
     },
     "vad": {
@@ -156,7 +160,9 @@ DEFAULTS: Dict[str, Any] = {
         # 3 (strictest) on a telephony line: at 2, steady line noise kept the
         # utterance open for seconds after the caller stopped.
         "aggressiveness": 3,
-        "end_silence_ms": 420,
+        # The caller waits this out on every single turn, so it is the one number
+        # that is felt directly. 320 ms still tolerates a breath mid-sentence.
+        "end_silence_ms": 320,
         "speculative_silence_ms": 220,
         "start_frames": 3,
         "max_utterance_ms": 20000,

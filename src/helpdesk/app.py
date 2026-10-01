@@ -115,6 +115,16 @@ class HelpdeskApplication:
             cpu_threads=int(asr_config.get("cpu_threads", 4)),
         )
 
+        # onnxruntime reads its thread limits when it is first imported, and the
+        # TTS backends import it lazily, so this has to happen before the
+        # synthesizer is constructed. Piper on CPU is otherwise capped at whatever
+        # OMP_NUM_THREADS happened to be, which on a big host leaves cores idle.
+        piper_threads = int((config["tts"].get("piper") or {}).get("threads", 0))
+        if piper_threads > 0:
+            os.environ["OMP_NUM_THREADS"] = str(piper_threads)
+            os.environ["ORT_INTRA_OP_NUM_THREADS"] = str(piper_threads)
+            log.info("synthesis thread limit set to %d", piper_threads)
+
         self.synthesizer = build_synthesizer(config["tts"])
         # Fail fast on a voice that cannot load: this is a pure config error and
         # must not cost a multi-minute model download before it surfaces.

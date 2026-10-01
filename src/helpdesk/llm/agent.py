@@ -57,16 +57,19 @@ So sprichst du:
 
 Was du frei formulieren darfst:
 - Die Gesprächsführung: begrüßen, zuhören, nachfragen, bestätigen, verabschieden.
-  Dafür brauchst du kein WISSEN. Sprich dabei wie ein freundlicher Mensch am
-  Telefon, nicht wie ein Formular.
+  Sprich dabei wie ein freundlicher Mensch am Telefon, nicht wie ein Formular.
+- Allgemeinwissen und alltägliche Begriffe. Wenn der Anrufer fragt, was ein
+  Netzwerkkabel, ein Display oder ein Neustart ist, erkläre es einfach in einem
+  Satz. Das steht nicht im WISSEN und muss da auch nicht stehen.
 - Wenn du etwas nicht verstanden hast, frage gezielt nach dem Teil, der dir
   fehlt, statt allgemein "können Sie das wiederholen".
 
 Woran du gebunden bist:
-- Alle Tatsachen zum Unternehmen - Abläufe, Preise, Zeiten, technische
-  Schritte, Zuständigkeiten - stehen ausschließlich im Abschnitt WISSEN.
-- Steht dort nichts zur Frage, erfinde nichts. Frage einmal gezielt nach, und
-  wenn es dann noch nicht passt, leite weiter.
+- Tatsachen, die nur dieses Unternehmen betreffen: Preise, Termine, Zeiten,
+  Zuständigkeiten, Rufnummern, interne Abläufe und die konkreten Schritte zu
+  einem Gerät oder System. Diese stehen ausschließlich im Abschnitt WISSEN.
+- Steht dort nichts dazu, erfinde es nicht. Sage, dass du es nicht weißt, und
+  leite weiter.
 - Nenne nie Dinge, die der Anrufer nicht erwähnt hat und die nicht im WISSEN
   stehen. Keine Bestellnummern, Artikelnamen oder Formulare, von denen nirgends
   die Rede war.
@@ -79,6 +82,11 @@ Woran du gebunden bist:
   Weiteres, sage das offen und leite weiter.
 - Gehe auf das ein, was der Anrufer zuletzt gesagt hat. Beantworte seine Frage,
   nicht die, die du erwartet hast.
+- Stelle niemals dieselbe Frage zweimal. Hast du etwas schon gefragt und keine
+  brauchbare Antwort bekommen, frage nicht erneut: beantworte stattdessen, was
+  der Anrufer wissen will, oder leite weiter.
+- Fragt der Anrufer zurück, was du mit einem Begriff meinst, dann erkläre den
+  Begriff. Stelle keine Gegenfrage.
 
 Wenn du nicht helfen kannst, leite weiter:
 - Schreibe dann {transfer_marker} an das Ende deiner Antwort.
@@ -109,6 +117,21 @@ class AgentReply:
     first_token_ms: int = 0
     total_ms: int = 0
     retrieved: List[str] = field(default_factory=list)
+    #: how many times in a row this answer has essentially repeated the last one
+    repeat_count: int = 0
+
+
+def _similarity(a: str, b: str) -> float:
+    """Rough similarity of two answers, ignoring wording and punctuation."""
+    import difflib  # noqa: PLC0415
+
+    def norm(text: str) -> str:
+        return " ".join(re.sub(r"[^\w\säöüß]", " ", text.lower(), flags=re.UNICODE).split())
+
+    left, right = norm(a), norm(b)
+    if not left or not right:
+        return 0.0
+    return difflib.SequenceMatcher(None, left, right).ratio()
 
 
 class MarkerFilter:
@@ -190,10 +213,16 @@ class HelpdeskAgent:
         self.history: List[Turn] = []
         #: consecutive turns we failed to understand; drives the hand-off rule
         self.misunderstood = 0
+        #: consecutive near-identical answers. A caller hearing the same sentence
+        #: three times has been abandoned, whatever the model thinks it is doing.
+        self.repeated = 0
+        #: similarity above which two answers count as the same
+        self.repeat_threshold = 0.82
 
     def reset(self) -> None:
         self.history.clear()
         self.misunderstood = 0
+        self.repeated = 0
 
     def system_prompt(self) -> str:
         prompt = self.system_prompt_template.format(
@@ -212,12 +241,19 @@ class HelpdeskAgent:
         for turn in self.history[-self.history_turns :]:
             messages.append({"role": turn.role, "content": turn.content})
         knowledge = context.strip() or NO_KNOWLEDGE_NOTE
-        messages.append(
-            {
-                "role": "user",
-                "content": f"WISSEN:\n{knowledge}\n\nANRUFER SAGT:\n{user_text}",
-            }
-        )
+        parts = [f"WISSEN:\n{knowledge}"]
+        if self.repeated:
+            previous = next(
+                (t.content for t in reversed(self.history) if t.role == "assistant"), ""
+            )
+            parts.append(
+                "HINWEIS: Du hast gerade gesagt: \"" + previous + "\"\n"
+                "Der Anrufer kommt damit nicht weiter. Sage es NICHT noch einmal "
+                "und stelle keine Frage, die du schon gestellt hast. Beantworte, "
+                "was er wissen will, oder sage, dass du nicht weiterhelfen kannst."
+            )
+        parts.append(f"ANRUFER SAGT:\n{user_text}")
+        messages.append({"role": "user", "content": "\n\n".join(parts)})
         return messages
 
     async def retrieve(self, query: str) -> Tuple[str, List[str]]:
@@ -267,12 +303,26 @@ class HelpdeskAgent:
             yield tail
 
         text = re.sub(r"\s{2,}", " ", "".join(spoken)).strip()
+
+        previous = next(
+            (t.content for t in reversed(self.history) if t.role == "assistant"), ""
+        )
+        if text and previous and _similarity(text, previous) >= self.repeat_threshold:
+            self.repeated += 1
+            log.info(
+                "answer repeats the previous one (%d in a row): %r",
+                self.repeated, text[:70],
+            )
+        else:
+            self.repeated = 0
+
         self.last_reply = AgentReply(
             text=text,
             action=marker_filter.action,
             first_token_ms=first_token_ms,
             total_ms=int((time.monotonic() - started) * 1000),
             retrieved=retrieved,
+            repeat_count=self.repeated,
         )
         self.history.append(Turn(role="user", content=user_text))
         self.history.append(Turn(role="assistant", content=text or "(keine Antwort)"))

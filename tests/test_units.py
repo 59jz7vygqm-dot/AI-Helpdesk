@@ -181,6 +181,8 @@ check("identifier kept and split", set(tokenize("Fehler E-512")) >= {"e-512", "5
 check("stopwords removed", "der" not in tokenize("der Drucker"))
 
 print("config")
+# Capture before overriding, so the check does not depend on the default value.
+original_silence = DEFAULTS["vad"]["end_silence_ms"]
 os.environ["HELPDESK_VAD_END_SILENCE_MS"] = "333"
 os.environ["HELPDESK_TTS_PIPER_USE_CUDA"] = "yes"
 os.environ["HELPDESK_SIP_CODEC_PREFERENCE"] = "PCMU,PCMA"
@@ -188,7 +190,8 @@ merged = apply_env_overrides(DEFAULTS)
 check("int override", merged["vad"]["end_silence_ms"] == 333)
 check("nested bool override", merged["tts"]["piper"]["use_cuda"] is True)
 check("list override", merged["sip"]["codec_preference"] == ["PCMU", "PCMA"])
-check("defaults untouched", DEFAULTS["vad"]["end_silence_ms"] == 420)
+check("defaults not mutated", DEFAULTS["vad"]["end_silence_ms"] == original_silence,
+      f"DEFAULTS changed from {original_silence}")
 
 print()
 print(f"{PASSED} checks passed, {FAILED} failed")

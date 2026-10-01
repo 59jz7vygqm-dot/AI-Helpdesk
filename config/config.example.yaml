@@ -108,10 +108,14 @@ tts:
     model_path: /models/piper/de_DE-thorsten-medium.onnx
     config_path: ""                # defaults to model_path + .json
     length_scale: 1.0              # >1 slower, <1 faster
-    threads: 4                     # 0 = let onnxruntime decide
+    # Synthesis is the biggest share of the response time, so give it cores.
+    threads: 8                     # 0 = let onnxruntime decide (too conservative)
     noise_scale: 0.667
     noise_w: 0.8
-    use_cuda: false                # CPU is fast enough and keeps VRAM free
+    # THE latency lever: on the GPU the realtime factor drops from ~0.3 to under
+    # 0.05, for a few hundred MB of VRAM. Needs an image built with
+    # TTS_PROFILE=quality, which installs onnxruntime-gpu.
+    use_cuda: false
 
   chatterbox:
     device: cuda
@@ -164,8 +168,9 @@ vad:
   # 3 on a phone line: at 2, steady line noise kept an utterance open for
   # seconds after the caller had finished.
   aggressiveness: 3                 # webrtcvad 0-3; 3 is strictest
-  end_silence_ms: 420               # THE latency dial: lower feels snappier but
-                                    # starts cutting people off mid-sentence
+  # The caller waits this out on every turn, so it is felt directly. Lower feels
+  # snappier but starts cutting off people who pause for breath.
+  end_silence_ms: 320
   speculative_silence_ms: 220       # start recognising here, before the hangover
   start_frames: 3                   # 60 ms of voice to open a turn
   max_utterance_ms: 20000

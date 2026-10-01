@@ -58,9 +58,6 @@ class PiperSynthesizer(Synthesizer):
             raise FileNotFoundError(
                 f"Piper voice not found: {self.model_path}. Run scripts/download_models.sh"
             )
-        if self.threads > 0:
-            # onnxruntime otherwise picks a default that can leave cores idle.
-            os.environ.setdefault("OMP_NUM_THREADS", str(self.threads))
         log.info(
             "loading Piper voice %s (cuda=%s, threads=%s)",
             self.model_path, self.use_cuda, self.threads or "auto",

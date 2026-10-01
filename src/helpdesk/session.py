@@ -394,6 +394,14 @@ class CallSession:
             return
 
         reply = self.agent.last_reply
+        if reply.repeat_count >= 2 and self.transfer_number:
+            # Three near-identical answers means the agent is stuck, whatever it
+            # thinks it is doing. Hand over rather than loop.
+            log.warning(
+                "answer repeated %d times, handing over instead of looping",
+                reply.repeat_count,
+            )
+            self._pending_action = Action.TRANSFER
         metrics.llm_first_token_ms = reply.first_token_ms
         metrics.llm_total_ms = reply.total_ms
         metrics.reply_chars = len(reply.text)

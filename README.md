@@ -420,7 +420,12 @@ Start vorgerendert (kosten also keine Zeit), gespielt sobald die Antwort länger
 als `filler_after_ms` braucht. Nie zweimal derselbe hintereinander, weil
 *das* mechanischer klingt als die Pause. Bei schnellen Antworten passiert nichts.
 
-**4. Erst dann an der Latenz drehen.** Und dort zuerst die Sprachausgabe: Im Log
+**4. Wiederholungen.** Wenn der Agent dieselbe Antwort mehrfach gibt, ist das
+Gespräch für den Anrufer vorbei. Ähnliche Antworten werden jetzt erkannt: beim
+zweiten Mal bekommt das Modell seinen eigenen Satz mit dem Hinweis, ihn nicht zu
+wiederholen, beim dritten wird weitergeleitet.
+
+**5. Erst dann an der Latenz drehen.** Und dort zuerst die Sprachausgabe: Im Log
 steht pro Antwort, wohin die Zeit ging.
 
 ```
@@ -429,9 +434,21 @@ turn 1: response 5975 ms (asr 0*, kb 2862, llm_ttft 266, tts 5975)
 
 Hier ist alles Synthese — das Sprachmodell braucht 266 ms, die Erkennung dank
 Vorausberechnung 0 ms. Die Eingabe zu streamen würde an solchen Zahlen nichts
-ändern. Was wirkt: die `medium`-Stimme statt `high` und ein kleiner erster
-Sprachblock (`tts.first_chunk_min_chars`), damit der Agent nach dem ersten
-Teilsatz zu sprechen beginnt statt nach dem ganzen.
+ändern.
+
+Was tatsächlich wirkt, in der Reihenfolge der Wirkung:
+
+| Maßnahme | Effekt | Kosten |
+|---|---|---|
+| `tts.piper.use_cuda: true` | Realtime-Faktor ~0,3 → unter 0,05 | ~300 MB VRAM, Image mit `TTS_PROFILE=quality` |
+| `tts.piper.threads` auf die Kernzahl | Synthese 2–3× schneller auf CPU | nichts |
+| `medium`-Stimme statt `high` | ~3× schnellere Synthese | bei 8 kHz nicht hörbar |
+| `tts.first_chunk_min_chars: 14` | Sprechbeginn nach Teilsatz statt Satz | minimal andere Betonung |
+| `vad.end_silence_ms: 320` | 100 ms weniger Wartezeit pro Turn | schneidet eher mal jemanden ab |
+
+Zum Nachrechnen: `response_ms` im Log ist die Zeit von „Anrufer verstummt" bis
+„erstes Audio raus". Die Sprechpause (`end_silence_ms`) kommt davor noch dazu —
+das ist die Pause, die der Anrufer wirklich erlebt.
 
 ## Konfiguration
 
