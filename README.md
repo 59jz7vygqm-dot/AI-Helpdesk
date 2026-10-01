@@ -42,13 +42,14 @@ komplett zum Laufen; die gute Stimme ist danach ein Konfigurationsschritt.
 |---|---|---|---|---|
 | **Piper** (Standard) | ~30–60 ms | 0 (CPU) | verständlich, hörbar synthetisch | im Image enthalten |
 | Chatterbox | ~300–500 ms | ~3 GB | natürlich, klonbar, MIT | Image mit `TTS_PROFILE=quality` |
-| Qwen3-TTS | ~150–400 ms | ~4–8 GB | am besten, Apache-2.0 | eigener Container, siehe unten |
+| Qwen3-TTS | ~200–500 ms | ~4–8 GB | am besten, Apache-2.0 | eigener Container (mitgeliefert) |
 
-Warum Qwen3-TTS nicht im Image ist, obwohl es das beste wäre: sein PyPI-Paket
-verlangt **Python ≥ 3.13**, die CUDA-Basis-Images liefern 3.10. Und Chatterbox
-pinnt `torch==2.6.0` exakt, verträgt sich also nicht mit einem selbst gewählten
-torch. Beides sind reale Abhängigkeitskonflikte, keine Vermutungen — deshalb ist
-der Standardpfad bewusst der, der ohne Überraschungen durchläuft.
+Warum Qwen3-TTS nicht im Agent-Image steckt: sein PyPI-Paket verlangt
+**Python ≥ 3.13**, die CUDA-Basis-Images liefern 3.10. Und Chatterbox pinnt
+`torch==2.6.0` exakt, verträgt sich also nicht mit einem selbst gewählten torch.
+Beides sind reale Abhängigkeitskonflikte, keine Vermutungen. Qwen3-TTS läuft
+deshalb als eigener Dienst (`docker-compose.qwen.yml`, siehe unten) — dort ist
+Python 3.13 kein Problem, und torch bringt seine CUDA-Bibliotheken selbst mit.
 
 Was zur Menschlichkeit genauso viel beiträgt wie die Stimme — und alles eingebaut
 ist: dass man ihn **jederzeit unterbrechen** kann, dass sein eigenes Echo das
@@ -149,23 +150,50 @@ tts:
     reference_audio: /models/piper/meine-stimme.wav
 ```
 
-**Stufe 2: Qwen3-TTS** (bestes Deutsch, Apache-2.0, Klonen aus 3 Sekunden). Es
-kann nicht ins Image, weil sein PyPI-Paket Python 3.13 braucht. Der saubere Weg
-ist ein eigener Container, der es als OpenAI-kompatiblen TTS-Dienst anbietet —
-das Backend dafür ist schon eingebaut:
+**Stufe 2: Qwen3-TTS** — das beste lokale Deutsch, Apache-2.0, Stimmklonen aus
+wenigen Sekunden. Läuft in einem eigenen Container, weil sein PyPI-Paket
+Python 3.13 verlangt und das Agent-Image auf einer CUDA-Basis mit 3.10 steht:
 
-```yaml
-tts:
-  backend: openai
-  openai:
-    base_url: "http://127.0.0.1:8880/v1"
-    response_format: pcm        # Pflicht: alles andere kostet Latenz
-    sample_rate: 24000
+```bash
+cp config/profiles/quality-qwen.yaml config/config.yaml
+sudo docker compose -f docker-compose.yml -f docker-compose.qwen.yml up -d --build
+sudo docker compose logs -f qwen-tts
 ```
 
-Damit ist auch jeder andere TTS-Server nutzbar (Kokoro, XTTS, LocalAI). Den
-Qwen3-Dienst selbst liefert dieses Repo noch nicht mit — sag Bescheid, wenn du
-ihn brauchst.
+Der erste Start lädt ~5 GB von Hugging Face ins `/models`-Volume. Warte auf:
+
+```
+warmup ok with language='German': 1840 ms audio at 24000 Hz in 410 ms (rtf 0.22)
+listening on 0.0.0.0:8880 (POST /v1/audio/speech)
+```
+
+Diese Zeile ist wichtig: sie sagt, **welcher Sprachwert funktioniert hat**
+(`German` oder `de` — das unterscheidet sich zwischen Builds, der Container
+probiert beide) und wie schnell die Stimme ist. Danach:
+
+```bash
+curl -s http://127.0.0.1:8880/health
+curl -s http://127.0.0.1:8880/voices     # verfügbare Sprecher für QWEN_SPEAKER
+sudo docker compose exec helpdesk python3 /app/scripts/try_pipeline.py "Mein Drucker druckt nicht"
+```
+
+Eigene Stimme klonen — Aufnahme nach `./voices/` legen, dann in `.env`:
+
+```bash
+QWEN_MODE=clone
+QWEN_REF_AUDIO=/voices/meine-stimme.wav
+QWEN_REF_TEXT=Guten Tag, Sie sprechen mit dem Service der Beispiel GmbH.
+```
+
+Oder die Stimme in Worten beschreiben: `QWEN_MODE=design` plus
+`QWEN_INSTRUCT="ruhige, freundliche Frauenstimme, mittleres Tempo"`.
+
+Dieselbe Schnittstelle nimmt auch jeden anderen TTS-Server (Kokoro, XTTS,
+LocalAI) — nur `tts.openai.base_url` ändern.
+
+**VRAM:** Qwen3-TTS 1.7B braucht ~8 GB, zusammen mit Whisper und dem
+Sprachmodell etwa 15 GB von 23. Wenn es eng wird:
+`QWEN_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` halbiert das.
 
 Rechtlich, weil es praktisch relevant ist: eine fremde Stimme zu klonen braucht
 deren Einverständnis.
@@ -669,5 +697,6 @@ src/helpdesk/
 config/         Konfiguration, kommentiert, plus drei VRAM-Profile
 knowledge/      Wissensdatenbank (Markdown)
 scripts/        Preflight, Modelldownload, Pipeline-Test, Tests, Healthcheck
-tests/          simulierte PBX, Session-, Verdrahtungs- und Unit-Tests
+tts-server/     Qwen3-TTS als eigener Dienst (Python 3.13, OpenAI-kompatibel)
+tests/          simulierte PBX, Session-, Verdrahtungs-, Unit- und TTS-Tests
 ```

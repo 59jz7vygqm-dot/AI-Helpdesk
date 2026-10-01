@@ -1,0 +1,14 @@
+# Qwen3-TTS needs Python >= 3.13, which is why this runs in its own container
+# instead of inside the agent image.
+qwen3-tts>=0.1.0
+
+# torch is installed from the CUDA 12.8 index in the Dockerfile, not here, so the
+# wheel matches. It ships the CUDA libraries itself, which is what lets a plain
+# python:3.13 base image use the GPU.
+
+aiohttp>=3.9
+numpy>=1.26
+soundfile>=0.12
+transformers>=4.46
+accelerate>=1.0
+huggingface-hub>=0.26
