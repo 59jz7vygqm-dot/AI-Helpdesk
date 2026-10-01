@@ -8,7 +8,10 @@ services:
         TTS_PROFILE: "${TTS_PROFILE:-lite}"
     image: ai-helpdesk:latest
     container_name: ai-helpdesk
-    restart: unless-stopped
+    # Not unless-stopped: a configuration error would otherwise restart forever,
+    # reloading models each time. Five attempts covers a transient failure and
+    # then leaves the container stopped with the error visible in the log.
+    restart: on-failure:5
 
     # Host networking is strongly recommended for SIP.  RTP negotiates ports in
     # the SDP body, which Docker's NAT does not rewrite, so bridged networking
