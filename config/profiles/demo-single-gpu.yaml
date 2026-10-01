@@ -201,8 +201,14 @@ vad:
   start_frames: 3                   # 60 ms of voice to open a turn
   max_utterance_ms: 20000
   pre_roll_ms: 300                  # audio kept before the trigger
-  barge_in_ms: 260                  # speech needed to interrupt the agent
+  barge_in_ms: 200                  # speech needed to interrupt the agent
   speculative_asr: true
+
+  # Answer as soon as the running transcript reads as a finished sentence, rather
+  # than waiting out end_silence_ms on every turn. Conservative: needs a final
+  # full stop or question mark and at least semantic_min_words words.
+  semantic_endpointing: true
+  semantic_min_words: 3
 
   # Echo guard: stops the agent's own voice, echoed back by a speakerphone or
   # mobile, from being mistaken for the caller interrupting. Compares incoming
@@ -218,6 +224,10 @@ vad:
 dialog:
   # Without an article, so it reads correctly in every sentence the model builds.
   company: "Beispiel GmbH"
+
+  # helpdesk  = answers only from the knowledge base, hands over otherwise
+  # assistant = also chats freely (smalltalk, general questions); for demos
+  mode: helpdesk
   agent_name: "Alex"
 
   greeting: >-
@@ -237,12 +247,11 @@ dialog:
   # Played when the answer is not ready within filler_after_ms. Pre-rendered at
   # startup, so they cost nothing. Several variants on purpose: the same phrase
   # every turn sounds more mechanical than the pause it replaces.
-  fillers:
-    - "Einen Moment."
-    - "Einen Augenblick bitte."
-    - "Ich schaue kurz nach."
-    - "Moment, ich prüfe das."
-  filler_after_ms: 700              # 0 disables them
+  # Empty by default: these were added to cover a multi-second pause, and once
+  # answers arrive in well under a second they interrupt the flow rather than
+  # smoothing it. Fill the list to bring them back.
+  fillers: []
+  filler_after_ms: 900              # 0 disables them
 
   transfer_number: "200"            # REQUIRED: extension, queue or full number
 

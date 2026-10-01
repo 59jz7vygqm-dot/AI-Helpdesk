@@ -222,6 +222,7 @@ class HelpdeskApplication:
             context_chars=int(self.config["knowledge"].get("context_chars", 1800)),
             options=self.config["llm"].get("options") or {},
             extra_instructions=dialog.get("extra_instructions", ""),
+            mode=dialog.get("mode", "helpdesk"),
         )
         session = CallSession(
             call,

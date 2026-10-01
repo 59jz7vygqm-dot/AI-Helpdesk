@@ -511,6 +511,91 @@ async def test_hangup_during_answer_skips_transfer():
     return True
 
 
+async def test_semantic_endpoint_answers_early():
+    """A transcript that reads as a finished sentence must not wait out the hangover."""
+    config = build_config()
+    # A long hangover, so waiting it out would be clearly visible in the timing
+    config["vad"]["end_silence_ms"] = 2000
+    config["vad"]["speculative_silence_ms"] = 60
+    config["vad"]["semantic_endpointing"] = True
+    session, call, ua, synth, llm = await build_session(
+        ["Mein Drucker druckt nicht."], ["Haben Sie eine Meldung im Display?"], config=config
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+
+    await feed(session, speech(30))
+    t0 = time.monotonic()
+    # Only a little silence -- far less than the 2000 ms hangover
+    for frame in silence(20):
+        session._on_audio(frame)
+        await asyncio.sleep(0.001)
+    await wait_until(lambda: synth.spoken, 5, "answered")
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    assert elapsed_ms < 1500, f"waited {elapsed_ms:.0f} ms despite a complete sentence"
+    # Metrics are recorded once the turn completes, after the reply is spoken.
+    await wait_until(lambda: bool(session.metrics.turns), 5, "turn metrics")
+    assert session.metrics.turns[0].asr_speculative, \
+        "the speculative transcript was not reused"
+    print(f"PASS semantic endpoint answered after {elapsed_ms:.0f} ms "
+          f"instead of waiting 2000 ms")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_incomplete_transcript_still_waits():
+    """An unfinished sentence must NOT trigger the early answer."""
+    config = build_config()
+    config["vad"]["end_silence_ms"] = 600
+    config["vad"]["speculative_silence_ms"] = 60
+    session, call, ua, synth, llm = await build_session(
+        ["also ich wollte"], ["Ja?"], config=config
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    # No sentence-final punctuation, so _looks_complete must reject it
+    assert not session._looks_complete("also ich wollte")
+    assert not session._looks_complete("Ja."), "too few words should not count"
+    assert session._looks_complete("Mein Drucker druckt nicht.")
+    assert session._looks_complete("Was kostet das?")
+    print("PASS incomplete transcripts are not treated as finished")
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_assistant_mode_chats():
+    """In assistant mode smalltalk is answered, not handed to a human."""
+    from helpdesk.llm.agent import HelpdeskAgent
+
+    config = build_config()
+    config["dialog"]["mode"] = "assistant"
+    session, call, ua, synth, llm = await build_session(
+        ["Wie geht es dir?"], ["Mir geht es gut, danke der Nachfrage."], config=config
+    )
+    # build_session uses a helpdesk agent; swap in one built like app.py would
+    session.agent = HelpdeskAgent(llm, None, company="Testfirma", mode="assistant")
+    assert "Smalltalk" in session.agent.system_prompt()
+
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: any("gut" in s for s in synth.spoken), 5, "chat reply")
+    assert ua.transfers == [], f"smalltalk was transferred: {ua.transfers}"
+    print("PASS assistant mode answers smalltalk instead of handing over")
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
 async def test_farewell_ends_the_call():
     """Saying goodbye must hang up politely, never transfer."""
     session, call, ua, synth, llm = await build_session(
@@ -688,6 +773,9 @@ async def main() -> int:
         ("filler on slow answer", test_filler_covers_a_slow_answer),
         ("no filler when fast", test_filler_skipped_when_answer_is_fast),
         ("hangup during answer", test_hangup_during_answer_skips_transfer),
+        ("semantic endpoint", test_semantic_endpoint_answers_early),
+        ("incomplete waits", test_incomplete_transcript_still_waits),
+        ("assistant mode", test_assistant_mode_chats),
     ]
     failed = 0
     for name, test in tests:

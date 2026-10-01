@@ -68,7 +68,44 @@ kurzen Abschiedssatz davor.
 Die Marker sind Steuerzeichen: nie vorlesen, nie erklären.
 """
 
+ASSISTANT_SYSTEM_PROMPT = """\
+Du bist {agent_name}, eine Stimme am Telefon von {company}. Antworte auf Deutsch.
+
+Sprich wie am Telefon: höchstens {max_sentences} Sätze, lieber einer. Keine
+Listen, keine Sonderzeichen, Zahlen ausgeschrieben. Eine Frage auf einmal.
+
+Du bist ein normaler Gesprächspartner. Smalltalk ist willkommen: wie es dir geht,
+was du bist, das Wetter, ein Scherz. Antworte darauf locker und kurz, so wie ein
+freundlicher Mensch es täte.
+
+Steht im Abschnitt WISSEN etwas zur Frage, nutze es. Steht dort nichts, antworte
+trotzdem aus deinem allgemeinen Wissen - sage einfach dazu, wenn du unsicher
+bist. Erfinde keine Angaben, die nur dieses Unternehmen betreffen könnten:
+Preise, Termine, Rufnummern und Zuständigkeiten nur aus dem WISSEN.
+
+Wiederhole keine Frage, die du schon gestellt hast. Geh auf das ein, was der
+Anrufer zuletzt gesagt hat.
+
+{transfer_marker} an das Ende nur, wenn der Anrufer ausdrücklich einen Menschen
+möchte oder es um Kündigung, Reklamation oder Rechtliches geht. Sage davor einen
+Satz wie "Einen Moment, ich verbinde Sie."
+
+{hangup_marker} an das Ende, wenn der Anrufer sich verabschiedet - mit einem
+kurzen Abschiedssatz davor.
+
+Die Marker sind Steuerzeichen: nie vorlesen, nie erklären.
+"""
+
+#: prompt per dialogue mode
+SYSTEM_PROMPTS = {
+    "helpdesk": DEFAULT_SYSTEM_PROMPT,
+    "assistant": ASSISTANT_SYSTEM_PROMPT,
+}
+
 NO_KNOWLEDGE_NOTE = "(Keine passenden Informationen gefunden.)"
+NO_KNOWLEDGE_NOTE_ASSISTANT = (
+    "(Nichts dazu in der Wissensdatenbank - antworte aus deinem allgemeinen Wissen.)"
+)
 
 
 @dataclass
@@ -165,6 +202,7 @@ class HelpdeskAgent:
         context_chars: int = 1800,
         options: Optional[Dict] = None,
         extra_instructions: str = "",
+        mode: str = "helpdesk",
     ) -> None:
         self.client = client
         self.kb = knowledge_base
@@ -176,7 +214,10 @@ class HelpdeskAgent:
         self.context_chars = context_chars
         self.options = options or {}
         self.extra_instructions = extra_instructions
-        self.system_prompt_template = system_prompt or DEFAULT_SYSTEM_PROMPT
+        self.mode = (mode or "helpdesk").lower()
+        self.system_prompt_template = (
+            system_prompt or SYSTEM_PROMPTS.get(self.mode, DEFAULT_SYSTEM_PROMPT)
+        )
         self.history: List[Turn] = []
         #: consecutive turns we failed to understand; drives the hand-off rule
         self.misunderstood = 0
@@ -207,7 +248,9 @@ class HelpdeskAgent:
         messages = [{"role": "system", "content": self.system_prompt()}]
         for turn in self.history[-self.history_turns :]:
             messages.append({"role": turn.role, "content": turn.content})
-        knowledge = context.strip() or NO_KNOWLEDGE_NOTE
+        knowledge = context.strip() or (
+            NO_KNOWLEDGE_NOTE_ASSISTANT if self.mode == "assistant" else NO_KNOWLEDGE_NOTE
+        )
         parts = [f"WISSEN:\n{knowledge}"]
         if self.repeated:
             previous = next(

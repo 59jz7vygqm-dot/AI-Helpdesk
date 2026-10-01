@@ -15,30 +15,40 @@ EMBED_MODEL="${EMBED_MODEL:-bge-m3}"
 VOICE="${VOICE:-de_DE-thorsten-medium}"
 BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE"
 
+# All German Piper voices, so you can try a few and pick by ear. "medium" is the
+# sweet spot for telephony; "low" is faster still and barely worse at 8 kHz.
 declare -A VOICE_PATHS=(
-  [de_DE-thorsten-high]="thorsten/high/de_DE-thorsten-high"
   [de_DE-thorsten-medium]="thorsten/medium/de_DE-thorsten-medium"
+  [de_DE-thorsten-low]="thorsten/low/de_DE-thorsten-low"
+  [de_DE-thorsten-high]="thorsten/high/de_DE-thorsten-high"
+  [de_DE-thorsten_emotional-medium]="thorsten_emotional/medium/de_DE-thorsten_emotional-medium"
   [de_DE-eva_k-x_low]="eva_k/x_low/de_DE-eva_k-x_low"
   [de_DE-kerstin-low]="kerstin/low/de_DE-kerstin-low"
   [de_DE-ramona-low]="ramona/low/de_DE-ramona-low"
   [de_DE-karlsson-low]="karlsson/low/de_DE-karlsson-low"
+  [de_DE-mls-medium]="mls/medium/de_DE-mls-medium"
+  [de_DE-pavoque-low]="pavoque/low/de_DE-pavoque-low"
 )
 
-path="${VOICE_PATHS[$VOICE]:-}"
-if [[ -z "$path" ]]; then
-  echo "Unknown voice '$VOICE'. Available: ${!VOICE_PATHS[*]}" >&2
-  exit 1
-fi
+# Fetch several at once to compare:  VOICE="a b c" ./scripts/download_models.sh
 
 mkdir -p "$VOICES_DIR"
-for ext in onnx onnx.json; do
-  target="$VOICES_DIR/$VOICE.$ext"
-  if [[ -f "$target" ]]; then
-    echo "already present: $target"
-    continue
+for voice in $VOICE; do
+  path="${VOICE_PATHS[$voice]:-}"
+  if [[ -z "$path" ]]; then
+    echo "Unknown voice '$voice'. Available:" >&2
+    printf '  %s\n' "${!VOICE_PATHS[@]}" | sort >&2
+    exit 1
   fi
-  echo "downloading $VOICE.$ext ..."
-  curl -fL --retry 3 -o "$target" "$BASE/$path.$ext"
+  for ext in onnx onnx.json; do
+    target="$VOICES_DIR/$voice.$ext"
+    if [[ -f "$target" ]]; then
+      echo "already present: $target"
+      continue
+    fi
+    echo "downloading $voice.$ext ..."
+    curl -fL --retry 3 -o "$target" "$BASE/$path.$ext"
+  done
 done
 
 echo
