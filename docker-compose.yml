@@ -37,7 +37,9 @@ services:
       # --- models ------------------------------------------------------
       HELPDESK_LLM_BASE_URL: "${OLLAMA_URL:-http://127.0.0.1:11434}"
       HELPDESK_LLM_MODEL: "${LLM_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
-      HELPDESK_TTS_BACKEND: "${TTS_BACKEND:-piper}"
+      # Empty on purpose: unset here, config.yaml decides the voice. Setting
+      # TTS_BACKEND in .env overrides the file.
+      HELPDESK_TTS_BACKEND: "${TTS_BACKEND:-}"
 
       # How the agent hands calls over. auto = try SIP REFER, fall back to the
       # PBX feature code (needed when a managed PBX has allow_transfer=no).

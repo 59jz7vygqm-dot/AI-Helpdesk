@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 
 def build_synthesizer(config: dict) -> Synthesizer:
     backend = (config.get("backend") or "piper").lower()
+    # Logged before anything loads: "I configured qwen3 but I hear piper" is the
+    # single most common confusion, and this line settles it in the first second.
+    log.info("voice backend: %s", backend)
 
     if backend == "piper":
         from .piper_tts import PiperSynthesizer

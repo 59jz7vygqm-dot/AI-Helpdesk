@@ -69,7 +69,7 @@ class FasterWhisperRecognizer(Recognizer):
         compute_type: str = "int8_float16",
         language: str = "de",
         beam_size: int = 1,
-        vad_filter: bool = False,
+        vad_filter: bool = True,
         download_root: Optional[str] = None,
         initial_prompt: Optional[str] = None,
         temperature: float = 0.0,
@@ -78,6 +78,7 @@ class FasterWhisperRecognizer(Recognizer):
         device_index: int = 0,
         num_workers: int = 1,
         cpu_threads: int = 4,
+        min_utterance_ms: int = 350,
     ) -> None:
         self.model_size = model_size
         self.device = device
@@ -93,6 +94,7 @@ class FasterWhisperRecognizer(Recognizer):
         self.device_index = device_index
         self.num_workers = num_workers
         self.cpu_threads = cpu_threads
+        self.min_utterance_ms = min_utterance_ms
 
         self._model = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
@@ -129,6 +131,12 @@ class FasterWhisperRecognizer(Recognizer):
             beam_size=self.beam_size,
             temperature=self.temperature,
             vad_filter=self.vad_filter,
+            vad_parameters=(
+                # Trim leading/trailing silence so the decoder sees speech only.
+                {"min_silence_duration_ms": 200, "speech_pad_ms": 120}
+                if self.vad_filter
+                else None
+            ),
             # The utterance is already endpointed, so conditioning on previous
             # text only invites the model to invent continuations.
             condition_on_previous_text=False,
@@ -183,7 +191,11 @@ class FasterWhisperRecognizer(Recognizer):
         )
 
     async def transcribe(self, pcm: np.ndarray, *, language: Optional[str] = None) -> Transcript:
-        if pcm.size < 16000 * 0.12:  # under ~120 ms is never a real utterance
+        min_ms = self.min_utterance_ms
+        if pcm.size < 16000 * min_ms / 1000:
+            # Below this it is a click, a breath or line noise. Transcribing it
+            # invites a hallucinated word that the dialogue then acts on.
+            log.debug("ignoring %d ms of audio (under %d ms)", pcm.size * 1000 // 16000, min_ms)
             return Transcript(text="", duration_ms=int(pcm.size * 1000 / 16000))
         loop = asyncio.get_running_loop()
         async with self._lock:

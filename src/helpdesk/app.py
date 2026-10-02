@@ -113,6 +113,8 @@ class HelpdeskApplication:
             min_avg_logprob=float(asr_config.get("min_avg_logprob", -1.1)),
             max_no_speech_prob=float(asr_config.get("max_no_speech_prob", 0.75)),
             cpu_threads=int(asr_config.get("cpu_threads", 4)),
+            vad_filter=bool(asr_config.get("vad_filter", True)),
+            min_utterance_ms=int(asr_config.get("min_utterance_ms", 350)),
         )
 
         # onnxruntime reads its thread limits when it is first imported, and the

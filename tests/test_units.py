@@ -179,6 +179,10 @@ long_doc = "# T\n" + ("satz. " * 400)
 check("long section is chunked", len(split_markdown(long_doc, "f.md", max_chars=300)) > 3)
 check("identifier kept and split", set(tokenize("Fehler E-512")) >= {"e-512", "512"})
 check("stopwords removed", "der" not in tokenize("der Drucker"))
+# Editing notes must not become retrievable text: an unset docker-compose
+# variable and a maintainer's comment are the two ways junk gets in.
+commented = split_markdown("# A\n<!-- fill this in -->\nnur das zaehlt\n", "f.md")
+check("html comment stripped", all("fill this in" not in c.text for c in commented))
 
 print("config")
 # Capture before overriding, so the check does not depend on the default value.
@@ -192,6 +196,15 @@ check("nested bool override", merged["tts"]["piper"]["use_cuda"] is True)
 check("list override", merged["sip"]["codec_preference"] == ["PCMU", "PCMA"])
 check("defaults not mutated", DEFAULTS["vad"]["end_silence_ms"] == original_silence,
       f"DEFAULTS changed from {original_silence}")
+# "${TTS_BACKEND:-}" expands to an empty string, which must leave config.yaml
+# alone -- otherwise compose silently pins the voice whatever the file says.
+os.environ["HELPDESK_TTS_BACKEND"] = ""
+check("empty override ignored",
+      apply_env_overrides({"tts": {"backend": "qwen3"}})["tts"]["backend"] == "qwen3")
+os.environ["HELPDESK_TTS_BACKEND"] = "piper"
+check("set override still wins",
+      apply_env_overrides({"tts": {"backend": "qwen3"}})["tts"]["backend"] == "piper")
+del os.environ["HELPDESK_TTS_BACKEND"]
 
 print()
 print(f"{PASSED} checks passed, {FAILED} failed")

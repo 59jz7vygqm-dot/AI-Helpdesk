@@ -54,6 +54,10 @@ asr:
   # "Drucker druckt nicht" and "Drucker trug nicht".
   initial_prompt: "Drucker, Papierstau, Fehlercode, Toner, VPN, Kennung, Passwort, Rechner, Bildschirm, Netzwerk."
   min_avg_logprob: -1.1            # below this the transcript is discarded
+  # Strip silence before decoding. The most effective guard against hallucinated
+  # words on short or quiet input, for about 10 ms.
+  vad_filter: true
+  min_utterance_ms: 350            # shorter than this is a click, not a sentence
   max_no_speech_prob: 0.75
   cpu_threads: 4
 
@@ -86,10 +90,9 @@ tts:
   #              THE default: in every image, never stalls, no GPU.
   # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages.
   #              Needs an image built with TTS_PROFILE=quality.
-  # qwen3      - Qwen3-TTS. Best quality, but the PyPI package needs Python 3.13
-  #              while the CUDA base images ship 3.10, so it is NOT in the image.
-  #              Run it in its own container and use the openai backend instead;
-  #              see the README section "Bessere Stimme".
+  # qwen3      - Qwen3-TTS. Best German voice, GPU. Needs an image built with
+  #              TTS_PROFILE=qwen -- without it the backend fails to import.
+  #              Careful: TTS_BACKEND in .env overrides this line.
   # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
   backend: piper
 
@@ -181,9 +184,10 @@ knowledge:
 
 vad:
   backend: auto                     # auto -> webrtc, then silero, then energy
-  # 3 on a phone line: at 2, steady line noise kept an utterance open for
-  # seconds after the caller had finished.
-  aggressiveness: 3                 # webrtcvad 0-3; 3 is strictest
+  # 2, not 3: level 3 discards quiet speech on a phone line, and a fragment
+  # reaching the recogniser is worse than a little extra hangover -- Whisper
+  # invents a plausible phrase out of half a second of audio.
+  aggressiveness: 2                 # webrtcvad 0-3; 3 is strictest
   # The caller waits this out on every turn, so it is felt directly. Lower feels
   # snappier but starts cutting off people who pause for breath.
   end_silence_ms: 320
@@ -216,7 +220,10 @@ vad:
 
 dialog:
   # Without an article, so it reads correctly in every sentence the model builds.
-  company: "Beispiel GmbH"
+  # Der echte Firmenname, ohne Artikel, damit jeder Satz des Modells passt.
+  # Steht hier bewusst neutral: ein erfundener Name wird sonst am Telefon
+  # vorgelesen, als wäre er echt.
+  company: "unserem Unternehmen"
 
   # helpdesk  = answers only from the knowledge base, hands over otherwise
   # assistant = also chats freely (smalltalk, general questions); for demos
@@ -224,8 +231,7 @@ dialog:
   agent_name: "Alex"
 
   greeting: >-
-    Guten Tag, hier ist der Service der Beispiel GmbH.
-    Was kann ich für Sie tun?
+    Guten Tag, hier ist der Service. Was kann ich für Sie tun?
   transfer_announcement: "Einen Moment bitte, ich verbinde Sie mit einem Kollegen."
   transfer_failed: >-
     Ich kann Sie im Moment leider nicht verbinden.
@@ -268,6 +274,9 @@ dialog:
   max_call_seconds: 900
   max_misunderstood: 2              # failed recognitions before handing off
   farewell_ends_call: true          # "Vielen Dank" ends the call, never transfers
+  # Hanging up is irreversible, so a goodbye needs real audio behind it and never
+  # counts on the first turn -- nobody rings up in order to say goodbye.
+  farewell_min_ms: 600
   answer_delay_ms: 0                # >0 to let it ring first, more human
   ring_before_answer: true
 

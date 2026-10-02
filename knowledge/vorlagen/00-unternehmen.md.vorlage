@@ -1,0 +1,35 @@
+# Über uns und Erreichbarkeit
+
+<!--
+  VORLAGE. Diese Datei wird NICHT geladen, solange sie auf .vorlage endet und
+  in knowledge/vorlagen/ liegt.
+
+  So nimmt der Agent sie in Betrieb:
+      cp knowledge/vorlagen/00-unternehmen.md.vorlage knowledge/00-unternehmen.md
+  dann die Platzhalter ersetzen und den Container neu starten.
+
+  Jede Zeile, die hier stehen bleibt, sagt der Agent irgendwann am Telefon.
+  Was du nicht weißt, loescht du besser ganz: zu einer Frage ohne Treffer sagt
+  er "das weiss ich nicht" und verbindet weiter -- das ist richtig. Eine
+  geratene Oeffnungszeit ist schlimmer als keine.
+
+  Schreibweise, die der Erkennung und der Stimme hilft:
+    - Eine Frage pro ## Überschrift, so wie ein Anrufer sie stellt.
+    - Antwort in zwei bis vier kurzen Sätzen. Der Agent liest sie vor.
+    - Zahlen ausschreiben: "acht bis achtzehn Uhr", nicht "8-18h".
+    - Fehlercodes und Modellnummern genau so, wie sie auf dem Gerät stehen.
+-->
+
+## Wer sind wir
+PLATZHALTER: Ein bis zwei Sätze, was die Firma tut und wo sie sitzt.
+
+## Wann ist der Support erreichbar
+PLATZHALTER: Die echten Zeiten. Und was außerhalb passiert.
+
+## Wie lange dauert eine Rückmeldung
+PLATZHALTER: Die zugesagten Reaktionszeiten, falls es welche gibt.
+Sonst diesen Abschnitt löschen.
+
+## Wie erreiche ich einen Mitarbeiter direkt
+PLATZHALTER: Nur falls es einen anderen Weg als diese Nummer gibt.
+Die Weiterleitung selbst macht der Agent über dialog.transfer_number.
