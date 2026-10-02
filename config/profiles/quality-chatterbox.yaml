@@ -194,7 +194,10 @@ vad:
   # The caller waits this out on every turn, so it is felt directly. Lower feels
   # snappier but starts cutting off people who pause for breath.
   end_silence_ms: 320
-  speculative_silence_ms: 220       # start recognising here, before the hangover
+  # Must finish before end_silence_ms, otherwise the semantic endpoint below can
+  # never fire. Recognition takes ~70-150 ms for a short utterance, so 140 ms
+  # leaves it enough room against a 320 ms hangover.
+  speculative_silence_ms: 140       # start recognising here, before the hangover
   start_frames: 3                   # 60 ms of voice to open a turn
   max_utterance_ms: 20000
   pre_roll_ms: 300                  # audio kept before the trigger

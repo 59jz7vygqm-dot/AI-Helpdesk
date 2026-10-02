@@ -166,7 +166,11 @@ DEFAULTS: Dict[str, Any] = {
         # The caller waits this out on every single turn, so it is the one number
         # that is felt directly. 320 ms still tolerates a breath mid-sentence.
         "end_silence_ms": 320,
-        "speculative_silence_ms": 220,
+        # Must leave room for recognition to finish before end_silence_ms, or the
+        # semantic endpoint can never fire and the hangover is paid in full.
+        # Live measurements showed ~70-150 ms for a short utterance, so starting
+        # at 140 ms gives it until 320 ms.
+        "speculative_silence_ms": 140,
         "start_frames": 3,
         "max_utterance_ms": 20000,
         "pre_roll_ms": 300,
