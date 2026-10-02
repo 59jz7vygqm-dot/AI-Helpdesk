@@ -1,0 +1,9 @@
+; Rendered from asterisk/templates/rtp.conf.tmpl at container start.
+;
+; Asterisk's default range is 10000-20000, which contains the agent's
+; 16000-16200. With network_mode: host there is no NAT between them, so both
+; processes reach for the same ports and a call comes up with no audio at all.
+; This range deliberately stops short of the agent's.
+[general]
+rtpstart=${ASTERISK_RTP_START}
+rtpend=${ASTERISK_RTP_END}

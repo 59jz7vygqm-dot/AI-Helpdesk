@@ -652,164 +652,145 @@ Der Agent registriert sich als normale Nebenstelle, damit er mit einer verwaltet
 PBX auskommt: keine Dialplan-Zeile, kein ARI-Zugang, nur Zugangsdaten. Das ist
 der einfachste Weg und kostet einen RTP-Hop weniger.
 
-Es gibt aber einen Grund für einen eigenen Asterisk dazwischen:
+Mit einem eigenen Asterisk dazwischen bekommst du den Dialplan zurück:
 
 ```
-Anbieter-PBX  --SIP-Registrierung-->  lokaler Asterisk  --AudioSocket/ARI-->  Agent
+Anbieter-PBX  --Registrierung als 1250-->  lokaler Asterisk  --Nebenstelle 7000-->  Agent
 ```
 
-Der lokale Asterisk registriert sich mit *denselben* Zugangsdaten als Nebenstelle
-bei der Anbieter-PBX. Von außen sieht das aus wie ein Tischtelefon, der Anbieter
-muss nichts tun und nichts freigeben. Hinter der eigenen Haustür hat man dann den
-vollen Dialplan.
+Der lokale Asterisk registriert sich wie ein Tischtelefon bei der Anbieter-PBX,
+mit einer **eigenen** Nummer. Der Agent registriert sich bei ihm.
 
-**Was das freischaltet:**
+### Einschalten
 
-* **Die fertigen Projekte.** Agent Voice Response, `ictinnovations/asterisk-ai-voice-agent`
-  und alles andere auf AudioSocket oder ARI braucht genau diesen Dialplan-Zugriff.
-  Das ist der stärkste Grund: diese Projekte sind weiter als dieses hier.
-* **Weiterleitung ohne Tricks.** REFER und die DTMF-Rückfallebene existieren nur,
-  weil manche PBX `allow_transfer=no` setzt. Beim eigenen Asterisk konfiguriert
-  man das selbst, und `Dial()` im Dialplan erledigt den Rest.
-* **Dialplan-Funktionen**, die der Agent nie bekommt: Aufzeichnung,
-  Warteschlangen, Zeitsteuerung, Rückfall auf einen echten Mitarbeiter, wenn der
-  Container nicht antwortet, mehrere Agenten auf einer Nummer.
-* **Eine Testumgebung**, die nicht von der Anbieter-PBX abhängt.
-
-**Was es kostet:**
-
-* Ein Dienst mehr, der laufen und überwacht werden muss. Fällt die Registrierung
-  des lokalen Asterisk aus, ist die Nummer tot — vorher hing das an einem Dienst,
-  jetzt an zwei.
-* Ein zusätzlicher RTP-Hop. Im LAN sind das Einzelstellen von Millisekunden,
-  gegen eine Antwortzeit von ~700 ms also nichts — **solange nicht transcodiert
-  wird.** Beide Beine auf `alaw` festnageln, sonst kommt G.722/Opus-Umrechnung
-  dazu und mit ihr Latenz und Artefakte.
-* Zwei Audio-Beine heißen zwei Gelegenheiten für einseitigen Ton.
-
-### Die zwei Kollisionen, die das sonst sofort zerlegen
-
-Beide Dienste wollen auf demselben Host dieselben Ports, und `network_mode: host`
-heißt: kein Docker-NAT, der das verdeckt.
-
-1. **SIP-Port 5060.** Asterisk nimmt ihn, der Agent muss ausweichen.
-2. **RTP-Bereich.** Asterisks Standard ist **10000–20000**, der Agent nutzt
-   **16000–16200** — das liegt mitten drin. Die beiden Prozesse greifen dann nach
-   denselben Ports, und der Anruf kommt ohne Ton zustande. Das ist der Fehler,
-   den man am längsten sucht.
+Beides liegt in diesem Repo, nicht in einem zweiten: ein `.env`, ein `git pull`,
+ein `docker compose up -d`. Bei getrennten Repos müssten Ports und Zugangsdaten
+über eine Repo-Grenze hinweg übereinstimmen — genau die Art Aufteilung, die
+schon einmal dazu geführt hat, dass die Konfiguration das eine sagte und der
+Container das andere tat.
 
 In `.env`:
 
 ```bash
-SIP_BIND_PORT=5080          # Asterisk behält 5060
-SIP_SERVER_HOST=127.0.0.1   # der Agent registriert sich lokal
-SIP_SERVER_PORT=5060
-SIP_USERNAME=7000           # eine Nebenstelle auf dem lokalen Asterisk
-RTP_PORT_START=16000
-RTP_PORT_END=16200
+COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml
+
+# Die Anbieter-PBX und die NEUE Nummer, die sie für diesen Asterisk ausgegeben hat
+PROVIDER_HOST=172.16.0.188
+PROVIDER_USER=1250
+PROVIDER_PASSWORD=...
+
+# Der Agent, jetzt eine Nebenstelle auf dem lokalen Asterisk
+SIP_USERNAME=7000
+SIP_PASSWORD=ein-lokales-passwort
+SIP_BIND_PORT=5080
+
+# Wohin unbeantwortete und weitergeleitete Anrufe gehen
+TRANSFER_NUMBER=1272
 ```
 
-Und in `rtp.conf` des lokalen Asterisk den eigenen Bereich aus dem Weg räumen:
+Dann wie immer:
 
-```ini
-[general]
-rtpstart=10000
-rtpend=15999
+```bash
+sudo docker compose up -d --build
+sudo docker compose logs -f
 ```
 
-### Asterisk-Konfiguration
+`COMPOSE_FILE` in `.env` ist der Trick: `docker compose` liest es von selbst, du
+musst dir also kein längeres Kommando merken. Zeile raus, und der Asterisk ist
+wieder weg.
 
-`pjsip.conf` — ungetestet, das ist die Standardform für „als Nebenstelle bei
-einer fremden PBX registrieren":
+`SIP_SERVER_HOST` zeigt der Agent-Container danach selbst auf `127.0.0.1` — das
+setzt die Overlay-Datei, damit eine alte Zeile in `.env` ihn nicht
+versehentlich direkt zur PBX schickt, wo sich beide um dieselbe Registrierung
+streiten würden.
 
-```ini
-; ---- ausgehende Registrierung bei der Anbieter-PBX ----
-[provider-reg]
-type=registration
-outbound_auth=provider-auth
-server_uri=sip:172.16.0.188
-client_uri=sip:1222@172.16.0.188
-retry_interval=60
+### Was das bringt
 
-[provider-auth]
-type=auth
-auth_type=userpass
-username=1222
-password=DEIN_PASSWORT
+* **Rückfall auf einen Menschen.** Antwortet der Agent nicht in
+  `AGENT_RING_SECONDS` — Container startet neu, Modell lädt, Image wird
+  gebaut —, klingelt der Dialplan bei `TRANSFER_NUMBER`. Der Anrufer landet nie
+  auf einer toten Nummer. Das ist der Punkt, den der Agent für sich selbst
+  prinzipiell nicht lösen kann.
+* **Weiterleitung ohne Tricks.** REFER und die DTMF-Rückfallebene existieren nur,
+  weil manche PBX `allow_transfer=no` setzt. Hier ist es ein `Dial()`.
+* **Aufzeichnung, Warteschlangen, Zeitsteuerung, mehrere Agenten auf einer
+  Nummer** — alles Dialplan, kein Anwendungscode.
+* **AudioSocket und ARI** werden möglich, also auch die gepflegten Projekte
+  (Agent Voice Response und andere), ohne an der Anbieter-PBX etwas zu ändern.
 
-[provider]
-type=endpoint
-context=von-pbx
-disallow=all
-allow=alaw                 ; nur alaw, damit nicht transcodiert wird
-outbound_auth=provider-auth
-aors=provider-aor
-from_user=1222
+### Was es kostet
 
-[provider-aor]
-type=aor
-contact=sip:172.16.0.188
+* Ein Dienst mehr, der laufen muss. Fällt dessen Registrierung aus, ist die
+  Nummer tot — vorher hing das an einem Dienst, jetzt an zwei.
+* Ein zusätzlicher RTP-Hop. Im LAN Einzelstellen von Millisekunden, gegen ~700 ms
+  Antwortzeit also nichts — **solange nicht transcodiert wird.** Beide Beine sind
+  deshalb auf `alaw` festgenagelt.
+* Zwei Audio-Beine heißen zwei Gelegenheiten für einseitigen Ton.
 
-[provider-ident]
-type=identify
-endpoint=provider
-match=172.16.0.188
+### Die zwei Kollisionen, die das sonst sofort zerlegen
 
-; ---- der Agent als lokale Nebenstelle 7000 ----
-[7000]
-type=endpoint
-context=von-agent
-disallow=all
-allow=alaw
-auth=7000-auth
-aors=7000-aor
+Bei `network_mode: host` gibt es kein Docker-NAT, das sie verdeckt.
 
-[7000-auth]
-type=auth
-auth_type=userpass
-username=7000
-password=EIN_LOKALES_PASSWORT
+1. **SIP-Port 5060.** Asterisk nimmt ihn, der Agent geht auf `SIP_BIND_PORT`.
+2. **RTP-Bereich.** Asterisks Standard ist **10000–20000** und enthält den
+   Bereich des Agenten (**16000–16200**). Beide Prozesse greifen dann nach
+   denselben Ports, der Anruf kommt zustande und ist **stumm**. Die
+   Overlay-Datei setzt Asterisk deshalb auf 10000–15999.
 
-[7000-aor]
-type=aor
-max_contacts=1
+### Zugangsdaten: zwei Konten, nicht eins
+
+`PROVIDER_USER` und `SIP_USERNAME` müssen verschieden sein. Ein Satz
+Zugangsdaten ist ein Gerät: registrieren sich lokaler Asterisk und Agent beide
+als dieselbe Nebenstelle, verwirft die PBX eine der beiden Registrierungen —
+und zwar sporadisch, was stundenlanges Suchen bedeutet.
+
+### Konfiguration
+
+Sie wird beim Start aus `asterisk/templates/*.tmpl` gerendert, damit Passwörter
+in `.env` bleiben und nicht in einer Image-Schicht. Anpassen heißt: Template
+ändern, dann `docker compose restart asterisk`.
+
+Der Entrypoint weigert sich zu starten, wenn etwas leer gerendert hat. Das ist
+nicht vorsorglich gemeint — beim Bauen passierte genau das zweimal: `envsubst`
+liest die Umgebung, nicht die Shell, also wurde aus einer gesetzten aber nicht
+exportierten Variable ein stilles `Dial(PJSIP/,)` und ein `server_uri` ohne
+Port. Eine Konfiguration, die lädt, registriert und nichts tut.
+
+Asterisks eigene `${EXTEN}` und `${DIALSTATUS}` überleben das Rendern; es werden
+nur die Namen ersetzt, die der Entrypoint selbst kennt.
+
+**Getestet ist das Rendern, nicht der Betrieb** — in dieser Entwicklungsumgebung
+gibt es keinen Docker-Daemon und keine PBX. Die pjsip-Struktur folgt der
+offiziellen Doku zu
+[res_pjsip_outbound_registration](https://docs.asterisk.org/Certified-Asterisk_18.9_Documentation/API_Documentation/Module_Configuration/res_pjsip_outbound_registration),
+inklusive der `type=transport`-Sektion, ohne die pjsip überhaupt nicht lauscht.
+
+### Diagnose, in dieser Reihenfolge
+
+```bash
+sudo docker compose logs -f asterisk
+sudo docker compose exec asterisk asterisk -rx 'pjsip show registrations'
+sudo docker compose exec asterisk asterisk -rx 'pjsip show endpoints'
+sudo docker compose exec asterisk asterisk -rx 'pjsip set logger on'   # SIP-Mitschnitt
 ```
 
-`extensions.conf`:
-
-```ini
-[von-pbx]
-; Anruf von der Anbieter-PBX geht an den Agenten.
-; Antwortet er nicht in 20 s, auf einen Menschen zurückfallen.
-exten => _X.,1,NoOp(eingehend von der PBX)
- same => n,Dial(PJSIP/7000,20)
- same => n,Dial(PJSIP/1272@provider,30)
- same => n,Hangup()
-
-[von-agent]
-; Der Agent leitet weiter: alles raus über die Anbieter-PBX.
-exten => _X.,1,Dial(PJSIP/${EXTEN}@provider,60)
- same => n,Hangup()
-```
-
-Damit wird `dialog.transfer_number: "1272"` zu einem gewöhnlichen `Dial()` im
-eigenen Dialplan, und `transfer_method` ist egal.
+`pjsip show registrations` muss `Registered` zeigen. Steht dort
+`Rejected`, lehnt die Anbieter-PBX ab: falsches Passwort, oder sie erlaubt
+keinen Asterisk mit diesen Daten.
 
 ### Vorher mit dem Anbieter klären
 
 * Darf sich ein Asterisk mit diesen Zugangsdaten registrieren? Manche Anbieter
   prüfen den User-Agent oder verbieten Trunking im Vertrag.
-* **Nur ein Gerät pro Zugangsdaten.** Registrieren sich lokaler Asterisk *und*
-  Agent gleichzeitig als 1222, gewinnt je nach PBX der Letzte oder es wird
-  abgewiesen. Die 1222 gehört dann ausschließlich dem lokalen Asterisk.
+* Eine eigene Nummer für den lokalen Asterisk, siehe oben.
 
 ### Ob es sich lohnt
 
-Für den IT-Demo-Betrieb: nein, die direkte Registrierung ist weniger beweglich.
+Für den Demo-Betrieb: nein, die direkte Registrierung ist weniger beweglich und
+läuft schon.
 
-Für den Produktivbetrieb: ja — vor allem, weil damit die gepflegten Projekte
-nutzbar werden und weil Aufzeichnung, Warteschlange und ein Rückfall auf einen
-Menschen aus dem Dialplan kommen statt aus Anwendungscode.
+Für den Produktivbetrieb: ja — vor allem wegen des Rückfalls auf einen Menschen.
+Ein Agent, der sich selbst überwacht, kann nicht melden, dass er tot ist.
 
 ---
 
@@ -966,6 +947,7 @@ src/helpdesk/
   app.py        Verdrahtung und Start
 config/         Konfiguration, kommentiert, plus drei VRAM-Profile
 knowledge/      Wissensdatenbank (Markdown)
+asterisk/       optionaler lokaler Asterisk (Templates + Entrypoint)
 scripts/        Preflight, Modelldownload, Pipeline-Test, Tests, Healthcheck
 tts-server/     Qwen3-TTS als eigener Dienst (Python 3.13, OpenAI-kompatibel)
 tests/          simulierte PBX, Session-, Verdrahtungs-, Unit- und TTS-Tests
