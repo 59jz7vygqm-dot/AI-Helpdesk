@@ -12,6 +12,17 @@
 #
 # Combine with the local Asterisk by listing all three, colon-separated.
 #
+# Bring the stack DOWN first when switching to this voice:
+#
+#   docker compose down && docker compose up -d --build
+#
+# depends_on only orders starts. On a plain `up -d` this service loads its
+# model while the previous agent container is still holding the GPU -- and that
+# container holds whatever local TTS it was configured with, several gigabytes
+# of it. Both fit on a 23 GB card only by luck; `down` first removes the
+# question. Switching away from a local voice backend is also what frees that
+# memory in the first place, since the agent then only speaks HTTP.
+#
 # NOT TESTED HERE -- this environment has no GPU and no docker daemon. The
 # route, the request fields and the 24 kHz PCM follow the vLLM-Omni speech API
 # docs; the first start is where you find out whether the image and the model

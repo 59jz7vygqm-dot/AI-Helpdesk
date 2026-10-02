@@ -195,9 +195,19 @@ VOXTRAL_GPU_FRACTION=0.45
 ```
 
 ```bash
+sudo docker compose down                # WICHTIG, siehe unten
 sudo docker compose up -d --build
 sudo docker compose logs -f voxtral     # ~8,7 GB Image, dann ~9 GB Modell
 ```
+
+**Erst `down`.** `depends_on` legt nur die Startreihenfolge fest: bei einem
+blanken `up -d` lädt Voxtral sein Modell, während der alte Agent-Container die
+GPU noch hält — und der hält seinerseits das lokal konfigurierte Sprachmodell,
+mehrere Gigabyte davon. Beides passt auf eine 23-GB-Karte höchstens mit Glück.
+
+Umgekehrt ist genau dieser Wechsel der Grund, warum der Speicher danach reicht:
+mit `tts.backend: openai` lädt der Agent **kein** Sprachmodell mehr, er spricht
+nur noch HTTP. Ein Agent mit Qwen3-TTS belegt rund 3,4 GB, die so frei werden.
 
 Das Image ist **`vllm/vllm-omni`**, nicht `vllm/vllm-openai`: `--omni` steckt im
 `vllm-omni`-Paket, im normalen Serving-Image ist es ein unbekanntes Argument.
