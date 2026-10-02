@@ -47,6 +47,11 @@ DEFAULTS: Dict[str, Any] = {
         # difference between "Drucker druckt nicht" and "Drucker trug nicht".
         "initial_prompt": "Drucker, Papierstau, Fehlercode, Toner, VPN, Kennung, Passwort, Rechner, Bildschirm, Netzwerk.",
         "min_avg_logprob": -1.1,
+        # Strip silence before decoding: the most effective guard against
+        # hallucinated words on short or quiet input.
+        "vad_filter": True,
+        # Below this an utterance is a click or a breath, not a sentence.
+        "min_utterance_ms": 350,
         "max_no_speech_prob": 0.75,
         "cpu_threads": 4,
     },
@@ -160,9 +165,10 @@ DEFAULTS: Dict[str, Any] = {
     },
     "vad": {
         "backend": "auto",
-        # 3 (strictest) on a telephony line: at 2, steady line noise kept the
-        # utterance open for seconds after the caller stopped.
-        "aggressiveness": 3,
+        # 2, not 3: level 3 discards quiet speech on a telephony line, and a
+        # fragment reaching the recogniser is worse than a little extra hangover --
+        # Whisper invents a plausible stock phrase out of half a second of audio.
+        "aggressiveness": 2,
         # The caller waits this out on every single turn, so it is the one number
         # that is felt directly. 320 ms still tolerates a breath mid-sentence.
         "end_silence_ms": 320,
@@ -221,6 +227,9 @@ DEFAULTS: Dict[str, Any] = {
         # "Vielen Dank" means goodbye, not "transfer me". Handled in code because
         # the model kept reading it as a request it could not fulfil.
         "farewell_ends_call": True,
+        # A goodbye hangs up, so it needs more than a short noisy fragment behind
+        # it, and never on the very first turn -- nobody calls to say goodbye.
+        "farewell_min_ms": 600,
         "answer_delay_ms": 0,
         "ring_before_answer": True,
     },

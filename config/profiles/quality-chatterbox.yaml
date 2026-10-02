@@ -61,6 +61,10 @@ asr:
   # "Drucker druckt nicht" and "Drucker trug nicht".
   initial_prompt: "Drucker, Papierstau, Fehlercode, Toner, VPN, Kennung, Passwort, Rechner, Bildschirm, Netzwerk."
   min_avg_logprob: -1.1            # below this the transcript is discarded
+  # Strip silence before decoding. The most effective guard against hallucinated
+  # words on short or quiet input, for about 10 ms.
+  vad_filter: true
+  min_utterance_ms: 350            # shorter than this is a click, not a sentence
   max_no_speech_prob: 0.75
   cpu_threads: 4
 
@@ -188,9 +192,10 @@ knowledge:
 
 vad:
   backend: auto                     # auto -> webrtc, then silero, then energy
-  # 3 on a phone line: at 2, steady line noise kept an utterance open for
-  # seconds after the caller had finished.
-  aggressiveness: 3                 # webrtcvad 0-3; 3 is strictest
+  # 2, not 3: level 3 discards quiet speech on a phone line, and a fragment
+  # reaching the recogniser is worse than a little extra hangover -- Whisper
+  # invents a plausible phrase out of half a second of audio.
+  aggressiveness: 2                 # webrtcvad 0-3; 3 is strictest
   # The caller waits this out on every turn, so it is felt directly. Lower feels
   # snappier but starts cutting off people who pause for breath.
   end_silence_ms: 320
@@ -275,6 +280,9 @@ dialog:
   max_call_seconds: 900
   max_misunderstood: 2              # failed recognitions before handing off
   farewell_ends_call: true          # "Vielen Dank" ends the call, never transfers
+  # Hanging up is irreversible, so a goodbye needs real audio behind it and never
+  # counts on the first turn -- nobody rings up in order to say goodbye.
+  farewell_min_ms: 600
   answer_delay_ms: 0                # >0 to let it ring first, more human
   ring_before_answer: true
 

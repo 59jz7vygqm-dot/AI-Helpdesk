@@ -29,15 +29,24 @@ RATE = 8000
 
 
 class StubRecognizer(Recognizer):
-    def __init__(self, texts: List[str]) -> None:
+    def __init__(self, texts: List[str], duration_ms: Optional[int] = None,
+                 avg_logprob: float = -0.3) -> None:
         self.texts = list(texts)
         self.calls = 0
+        self.duration_ms = duration_ms
+        self.avg_logprob = avg_logprob
 
     async def transcribe(self, pcm, *, language=None) -> Transcript:
         self.calls += 1
         await asyncio.sleep(0.01)
         text = self.texts.pop(0) if self.texts else ""
-        return Transcript(text=text, duration_ms=int(pcm.size * 1000 / 16000), latency_ms=10)
+        return Transcript(
+            text=text,
+            duration_ms=self.duration_ms if self.duration_ms is not None
+            else int(pcm.size * 1000 / 16000),
+            avg_logprob=self.avg_logprob,
+            latency_ms=10,
+        )
 
 
 class StubSynthesizer(Synthesizer):
@@ -596,17 +605,46 @@ async def test_assistant_mode_chats():
     return True
 
 
-async def test_farewell_ends_the_call():
-    """Saying goodbye must hang up politely, never transfer."""
+async def test_short_farewell_is_not_trusted():
+    """A stock phrase from a fragment of audio must not hang up on the caller."""
     session, call, ua, synth, llm = await build_session(
-        ["Vielen Dank."], ["sollte nicht aufgerufen werden [WEITERLEITEN]"]
+        ["Tschüss.", "Mein Drucker druckt nicht."],
+        ["Was zeigt das Display?", "Und die Meldung?"],
     )
+    # What the live call produced: 680 ms of audio becoming a goodbye
+    session.recognizer.duration_ms = 680
     runner = asyncio.ensure_future(session.run())
     await wait_until(lambda: call.rtp is not None, 2, "answer")
     call.rtp.start_draining(speed=20)
-    requests_before = len(llm.requests)
     await feed(session, speech(30) + silence(15))
-    await wait_until(lambda: ua.hangups or ua.transfers, 5, "call ended")
+    await wait_until(lambda: synth.spoken or ua.hangups, 5, "first turn handled")
+    await asyncio.sleep(0.2)
+    assert ua.hangups == [], f"hung up on a 680 ms fragment: {ua.hangups}"
+    print("PASS a goodbye on the first turn from 680 ms of audio does not hang up")
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_farewell_ends_the_call():
+    """Saying goodbye must hang up politely, never transfer."""
+    session, call, ua, synth, llm = await build_session(
+        ["Mein Drucker druckt nicht.", "Vielen Dank."],
+        ["Was zeigt das Display?", "sollte nicht aufgerufen werden [WEITERLEITEN]"]
+    )
+    session.recognizer.duration_ms = 1400
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    # First a real question, so the goodbye is not on turn one
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: synth.spoken, 5, "first answer")
+    requests_before = len(llm.requests)
+    # A genuine goodbye, long enough to be believed: a barge-in into the tail of
+    # the answer clips the front of the utterance, so feed more than the minimum.
+    await feed(session, speech(50) + silence(15))
+    await wait_until(lambda: ua.hangups or ua.transfers, 6, "call ended")
 
     assert ua.transfers == [], f"a farewell was transferred: {ua.transfers}"
     assert ua.hangups == ["assistant-goodbye"], ua.hangups
@@ -770,6 +808,7 @@ async def main() -> int:
         ("echo does not interrupt", test_echo_does_not_interrupt),
         ("transfer method passthrough", test_transfer_method_passed_through),
         ("farewell ends call", test_farewell_ends_the_call),
+        ("short farewell distrusted", test_short_farewell_is_not_trusted),
         ("filler on slow answer", test_filler_covers_a_slow_answer),
         ("no filler when fast", test_filler_skipped_when_answer_is_fast),
         ("hangup during answer", test_hangup_during_answer_skips_transfer),

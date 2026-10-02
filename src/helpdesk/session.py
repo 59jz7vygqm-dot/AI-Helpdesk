@@ -147,6 +147,7 @@ class CallSession:
         )
         self.resume_on_backchannel = bool(vad_config.get("resume_on_backchannel", True))
         self.farewell_ends_call = bool(dialog.get("farewell_ends_call", True))
+        self.farewell_min_ms = int(dialog.get("farewell_min_ms", 600))
         self.filler_after_ms = int(dialog.get("filler_after_ms", 700))
         self._last_filler = ""
         self._filler_task: Optional[asyncio.Task] = None
@@ -758,12 +759,25 @@ class CallSession:
         self._interrupted_remainder = ""
 
         if self.farewell_ends_call and is_farewell(transcript.text):
-            # Saying goodbye is not a request the agent cannot handle, so it must
-            # not become a transfer. Decided here rather than by the model.
-            log.info("farewell %r: saying goodbye", transcript.text)
-            self.metrics.add(metrics)
-            await self._do_hangup("assistant-goodbye")
-            return
+            # Hanging up is irreversible, so require more than a short noisy
+            # fragment. Whisper reliably invents a goodbye out of half a second of
+            # unclear audio, and nobody calls in order to say goodbye first.
+            if self._turn <= 1:
+                log.info(
+                    "ignoring farewell %r on the first turn -- probably a "
+                    "misrecognition, asking instead", transcript.text,
+                )
+            elif metrics.utterance_ms < self.farewell_min_ms or not transcript.is_confident:
+                log.info(
+                    "ignoring farewell %r: %d ms of audio, logprob %.2f -- not "
+                    "confident enough to hang up on",
+                    transcript.text, metrics.utterance_ms, transcript.avg_logprob,
+                )
+            else:
+                log.info("farewell %r: saying goodbye", transcript.text)
+                self.metrics.add(metrics)
+                await self._do_hangup("assistant-goodbye")
+                return
 
         if self.texts.thinking and metrics.utterance_ms > 2500:
             # Only for long questions, where retrieval and generation will take
