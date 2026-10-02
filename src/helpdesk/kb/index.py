@@ -30,6 +30,11 @@ _SPLIT_INNER = re.compile(r"[-/.]")
 #: markdown editing notes, stripped before chunking
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
+#: documentation about the corpus, which is not part of the corpus
+_NOT_CORPUS_FILES = {"readme", "liesmich", "index"}
+#: template directories, so an unfinished draft cannot be answered from
+_NOT_CORPUS_DIRS = {"vorlagen", "templates", "beispiele", "examples"}
+
 #: German function words carry no retrieval signal
 _STOPWORDS = {
     "der", "die", "das", "und", "oder", "ist", "sind", "ein", "eine", "einen",
@@ -186,9 +191,16 @@ class KnowledgeBase:
         if not os.path.isdir(self.directory):
             log.warning("knowledge directory %s does not exist", self.directory)
             return chunks
+        loaded: List[str] = []
         for root, _, files in os.walk(self.directory):
+            if os.path.basename(root) in _NOT_CORPUS_DIRS:
+                continue
             for name in sorted(files):
                 if not name.lower().endswith((".md", ".markdown", ".txt")):
+                    continue
+                if os.path.splitext(name)[0].lower() in _NOT_CORPUS_FILES:
+                    # Notes for whoever maintains the corpus are not corpus. A
+                    # README about writing answers was being retrieved as one.
                     continue
                 path = os.path.join(root, name)
                 try:
@@ -198,11 +210,14 @@ class KnowledgeBase:
                     log.warning("cannot read %s: %s", path, exc)
                     continue
                 relative = os.path.relpath(path, self.directory)
-                chunks.extend(
-                    split_markdown(
-                        text, relative, max_chars=self.max_chars, overlap_chars=self.overlap_chars
-                    )
+                found = split_markdown(
+                    text, relative, max_chars=self.max_chars, overlap_chars=self.overlap_chars
                 )
+                chunks.extend(found)
+                loaded.append(f"{relative}({len(found)})")
+        # Printed because "my file is not being used" is otherwise unanswerable
+        # from the log, and a bind mount makes it an easy mistake.
+        log.info("knowledge sources: %s", ", ".join(loaded) if loaded else "none")
         return chunks
 
     def _warn_about_placeholders(self, chunks: Sequence[Chunk]) -> None:

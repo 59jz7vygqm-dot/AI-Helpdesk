@@ -327,16 +327,39 @@ docker compose logs -f
 Erwartete Ausgabe:
 
 ```
+voice backend: piper
 loading ASR model large-v3-turbo (cuda, int8_float16)
 ASR model ready in 4.2s
 loading Piper voice /models/piper/de_DE-thorsten-high.onnx (cuda=False)
-knowledge base built: 14 chunks from /app/knowledge in 2.1s
+knowledge sources: 10-it-faq.md(13), 00-unternehmen.md(4)
+knowledge base built: 17 chunks from /app/knowledge in 2.1s
 warmup complete in 12.4s
 registered as 900, refreshing in 225s
 helpdesk ready: extension 900 on 192.168.1.10, transfers go to 200
 ```
 
+Die ersten beiden Zeilen sind die wichtigsten: `voice backend:` sagt, welche
+Stimme tatsächlich gewählt wurde, `knowledge sources:` welche Dateien geladen
+wurden und mit wie vielen Abschnitten. Beides beantwortet die zwei häufigsten
+„warum macht er das nicht"-Fragen aus dem Log.
+
 Dann die Nummer anrufen.
+
+### Nach einem `git pull`: `--build` nicht vergessen
+
+`./config` und `./knowledge` sind als Volume eingehängt und wirken sofort nach
+einem Neustart. **`src/` liegt im Image.** Ein `git pull` plus
+`docker compose up -d` aktualisiert also die Wissensdatenbank, aber nicht den
+Code — der Container läuft dann weiter mit der alten Logik, und zwar ohne sich
+zu beschweren.
+
+```bash
+git pull
+docker compose up -d --build      # die Layer sind gecacht, ~2 Minuten
+```
+
+`./scripts/preflight.sh` prüft das inzwischen und meldet
+`the image is older than src/`, wenn der Build fehlt.
 
 ---
 
