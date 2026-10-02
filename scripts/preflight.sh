@@ -154,6 +154,32 @@ if command -v docker >/dev/null 2>&1; then
       ;;
   esac
 
+  # A voice model that does not fit is a failed start after a multi-gigabyte
+  # pull, and gpu-memory-utilization is a fraction of TOTAL memory, not of what
+  # is free -- which is the arithmetic that is easy to get wrong.
+  if [ -n "${VOXTRAL_GPU_FRACTION:-}" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    mem=$(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits \
+          -i "$GPU_ID" 2>/dev/null | tr -d ' ')
+    vram_total=${mem%%,*}
+    vram_used=${mem##*,}
+    if [ -n "$vram_total" ] && [ -n "$vram_used" ]; then
+      budget=$(awk -v t="$vram_total" -v f="$VOXTRAL_GPU_FRACTION" 'BEGIN{printf "%d", t*f}')
+      vram_free=$((vram_total - vram_used))
+      if [ "$budget" -gt "$vram_free" ]; then
+        bad "VOXTRAL_GPU_FRACTION=$VOXTRAL_GPU_FRACTION wants ${budget} MiB, only ${vram_free} MiB free on GPU $GPU_ID"
+        hint "lower it, free the card, or use chatterbox (~3 GB) instead"
+      else
+        ok "voice model budget ${budget} MiB fits in ${vram_free} MiB free on GPU $GPU_ID"
+        # The agent's own ASR is not loaded yet when preflight runs, so say so
+        # rather than letting a pass here promise a start that then OOMs.
+        if [ $((vram_free - budget)) -lt 2500 ]; then
+          warn "only $((vram_free - budget)) MiB would be left -- Whisper needs ~2000 MiB of that"
+          hint "check what holds the card: nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv -i $GPU_ID"
+        fi
+      fi
+    fi
+  fi
+
   # ./config and ./knowledge are bind-mounted, so a `git pull` changes those
   # live -- but src/ is COPYd into the image. That asymmetry is a trap: the
   # knowledge base updates, the code does not, and the container quietly runs
