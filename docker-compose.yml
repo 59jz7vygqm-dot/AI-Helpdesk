@@ -28,6 +28,15 @@ services:
       HELPDESK_SIP_SERVER_HOST: "${SIP_SERVER_HOST}"
       HELPDESK_SIP_DOMAIN: "${SIP_DOMAIN:-${SIP_SERVER_HOST}}"
       HELPDESK_SIP_SERVER_PORT: "${SIP_SERVER_PORT:-5060}"
+      # Needed when something else already owns 5060 on this host -- a local
+      # Asterisk in front of the agent, for instance.
+      HELPDESK_SIP_BIND_PORT: "${SIP_BIND_PORT:-5060}"
+      # Asterisk's own default RTP range is 10000-20000, which overlaps the
+      # agent's. On host networking that is a real collision: the two processes
+      # race for the same ports and a call comes up with no audio. Move one of
+      # the two ranges when both run on the same machine.
+      HELPDESK_SIP_RTP_PORT_START: "${RTP_PORT_START:-16000}"
+      HELPDESK_SIP_RTP_PORT_END: "${RTP_PORT_END:-16200}"
       # Set this if auto-detection picks the wrong interface.
       HELPDESK_SIP_ADVERTISE_HOST: "${SIP_ADVERTISE_HOST:-}"
 

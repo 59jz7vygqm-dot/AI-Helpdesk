@@ -646,12 +646,185 @@ Was man am ehesten anfasst:
 
 ---
 
+## Eigener Asterisk davor — wenn die PBX fremdverwaltet ist
+
+Der Agent registriert sich als normale Nebenstelle, damit er mit einer verwalteten
+PBX auskommt: keine Dialplan-Zeile, kein ARI-Zugang, nur Zugangsdaten. Das ist
+der einfachste Weg und kostet einen RTP-Hop weniger.
+
+Es gibt aber einen Grund für einen eigenen Asterisk dazwischen:
+
+```
+Anbieter-PBX  --SIP-Registrierung-->  lokaler Asterisk  --AudioSocket/ARI-->  Agent
+```
+
+Der lokale Asterisk registriert sich mit *denselben* Zugangsdaten als Nebenstelle
+bei der Anbieter-PBX. Von außen sieht das aus wie ein Tischtelefon, der Anbieter
+muss nichts tun und nichts freigeben. Hinter der eigenen Haustür hat man dann den
+vollen Dialplan.
+
+**Was das freischaltet:**
+
+* **Die fertigen Projekte.** Agent Voice Response, `ictinnovations/asterisk-ai-voice-agent`
+  und alles andere auf AudioSocket oder ARI braucht genau diesen Dialplan-Zugriff.
+  Das ist der stärkste Grund: diese Projekte sind weiter als dieses hier.
+* **Weiterleitung ohne Tricks.** REFER und die DTMF-Rückfallebene existieren nur,
+  weil manche PBX `allow_transfer=no` setzt. Beim eigenen Asterisk konfiguriert
+  man das selbst, und `Dial()` im Dialplan erledigt den Rest.
+* **Dialplan-Funktionen**, die der Agent nie bekommt: Aufzeichnung,
+  Warteschlangen, Zeitsteuerung, Rückfall auf einen echten Mitarbeiter, wenn der
+  Container nicht antwortet, mehrere Agenten auf einer Nummer.
+* **Eine Testumgebung**, die nicht von der Anbieter-PBX abhängt.
+
+**Was es kostet:**
+
+* Ein Dienst mehr, der laufen und überwacht werden muss. Fällt die Registrierung
+  des lokalen Asterisk aus, ist die Nummer tot — vorher hing das an einem Dienst,
+  jetzt an zwei.
+* Ein zusätzlicher RTP-Hop. Im LAN sind das Einzelstellen von Millisekunden,
+  gegen eine Antwortzeit von ~700 ms also nichts — **solange nicht transcodiert
+  wird.** Beide Beine auf `alaw` festnageln, sonst kommt G.722/Opus-Umrechnung
+  dazu und mit ihr Latenz und Artefakte.
+* Zwei Audio-Beine heißen zwei Gelegenheiten für einseitigen Ton.
+
+### Die zwei Kollisionen, die das sonst sofort zerlegen
+
+Beide Dienste wollen auf demselben Host dieselben Ports, und `network_mode: host`
+heißt: kein Docker-NAT, der das verdeckt.
+
+1. **SIP-Port 5060.** Asterisk nimmt ihn, der Agent muss ausweichen.
+2. **RTP-Bereich.** Asterisks Standard ist **10000–20000**, der Agent nutzt
+   **16000–16200** — das liegt mitten drin. Die beiden Prozesse greifen dann nach
+   denselben Ports, und der Anruf kommt ohne Ton zustande. Das ist der Fehler,
+   den man am längsten sucht.
+
+In `.env`:
+
+```bash
+SIP_BIND_PORT=5080          # Asterisk behält 5060
+SIP_SERVER_HOST=127.0.0.1   # der Agent registriert sich lokal
+SIP_SERVER_PORT=5060
+SIP_USERNAME=7000           # eine Nebenstelle auf dem lokalen Asterisk
+RTP_PORT_START=16000
+RTP_PORT_END=16200
+```
+
+Und in `rtp.conf` des lokalen Asterisk den eigenen Bereich aus dem Weg räumen:
+
+```ini
+[general]
+rtpstart=10000
+rtpend=15999
+```
+
+### Asterisk-Konfiguration
+
+`pjsip.conf` — ungetestet, das ist die Standardform für „als Nebenstelle bei
+einer fremden PBX registrieren":
+
+```ini
+; ---- ausgehende Registrierung bei der Anbieter-PBX ----
+[provider-reg]
+type=registration
+outbound_auth=provider-auth
+server_uri=sip:172.16.0.188
+client_uri=sip:1222@172.16.0.188
+retry_interval=60
+
+[provider-auth]
+type=auth
+auth_type=userpass
+username=1222
+password=DEIN_PASSWORT
+
+[provider]
+type=endpoint
+context=von-pbx
+disallow=all
+allow=alaw                 ; nur alaw, damit nicht transcodiert wird
+outbound_auth=provider-auth
+aors=provider-aor
+from_user=1222
+
+[provider-aor]
+type=aor
+contact=sip:172.16.0.188
+
+[provider-ident]
+type=identify
+endpoint=provider
+match=172.16.0.188
+
+; ---- der Agent als lokale Nebenstelle 7000 ----
+[7000]
+type=endpoint
+context=von-agent
+disallow=all
+allow=alaw
+auth=7000-auth
+aors=7000-aor
+
+[7000-auth]
+type=auth
+auth_type=userpass
+username=7000
+password=EIN_LOKALES_PASSWORT
+
+[7000-aor]
+type=aor
+max_contacts=1
+```
+
+`extensions.conf`:
+
+```ini
+[von-pbx]
+; Anruf von der Anbieter-PBX geht an den Agenten.
+; Antwortet er nicht in 20 s, auf einen Menschen zurückfallen.
+exten => _X.,1,NoOp(eingehend von der PBX)
+ same => n,Dial(PJSIP/7000,20)
+ same => n,Dial(PJSIP/1272@provider,30)
+ same => n,Hangup()
+
+[von-agent]
+; Der Agent leitet weiter: alles raus über die Anbieter-PBX.
+exten => _X.,1,Dial(PJSIP/${EXTEN}@provider,60)
+ same => n,Hangup()
+```
+
+Damit wird `dialog.transfer_number: "1272"` zu einem gewöhnlichen `Dial()` im
+eigenen Dialplan, und `transfer_method` ist egal.
+
+### Vorher mit dem Anbieter klären
+
+* Darf sich ein Asterisk mit diesen Zugangsdaten registrieren? Manche Anbieter
+  prüfen den User-Agent oder verbieten Trunking im Vertrag.
+* **Nur ein Gerät pro Zugangsdaten.** Registrieren sich lokaler Asterisk *und*
+  Agent gleichzeitig als 1222, gewinnt je nach PBX der Letzte oder es wird
+  abgewiesen. Die 1222 gehört dann ausschließlich dem lokalen Asterisk.
+
+### Ob es sich lohnt
+
+Für den IT-Demo-Betrieb: nein, die direkte Registrierung ist weniger beweglich.
+
+Für den Produktivbetrieb: ja — vor allem, weil damit die gepflegten Projekte
+nutzbar werden und weil Aufzeichnung, Warteschlange und ein Rückfall auf einen
+Menschen aus dem Dialplan kommen statt aus Anwendungscode.
+
+---
+
 ## Fehlersuche
 
 **Registrierung schlägt fehl** — `sip.trace: true` setzen und Logs ansehen. Meist
 falsches Passwort, oder die PBX erwartet einen separaten Auth-Namen
 (`sip.auth_username`). Bei `403 Forbidden` lässt die PBX die IP des Containers
 nicht zu.
+
+**Kein Ton, und auf dem Host läuft noch ein Asterisk** — Asterisks
+Standard-RTP-Bereich ist 10000-20000 und überlappt den des Agenten
+(16000-16200). Bei `network_mode: host` greifen beide nach denselben Ports.
+`RTP_PORT_START`/`RTP_PORT_END` oder Asterisks `rtpstart`/`rtpend` verschieben;
+siehe den Abschnitt "Eigener Asterisk davor".
 
 **Verbindung steht, aber kein Ton** — fast immer Docker-Netzwerk. RTP handelt
 seine Ports im SDP aus, und Dockers NAT schreibt die nicht um. Deshalb steht
