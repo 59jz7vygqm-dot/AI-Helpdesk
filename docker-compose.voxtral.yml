@@ -23,10 +23,29 @@
 # question. Switching away from a local voice backend is also what frees that
 # memory in the first place, since the agent then only speaks HTTP.
 #
-# NOT TESTED HERE -- this environment has no GPU and no docker daemon. The
-# route, the request fields and the 24 kHz PCM follow the vLLM-Omni speech API
-# docs; the first start is where you find out whether the image and the model
-# agree. Watch it:  docker compose logs -f voxtral
+# KNOWN TO FAIL ON A CPU WITHOUT AVX (2026-10-02, vllm-omni v0.30.0):
+#
+#   FATAL: UCX library was compiled with avx but CPU does not support it.
+#   !!!!!!! Segfault encountered !!!!!!!  ... in ucs_init
+#
+# UCX checks at load time that the CPU has the instructions it was built with,
+# and kills the process when it does not -- during dlopen, so it cannot be
+# caught and no UCX_* variable overrides it. It is reached through an import
+# chain, not through anything configured here, so there is nothing to turn off.
+# The fix is upstream: rebuild the bundled UCX with --without-avx
+# (ai-dynamo/nixl PR 2122), not yet in a release.
+#
+# Virtual machines are the usual reason: a CPU model such as qemu64 or
+# x86-64-v2 hides AVX from the guest. Check before pulling 8.7 GB:
+#
+#   grep -o 'avx[^ ]*' /proc/cpuinfo | sort -u     # empty output means no AVX
+#
+# No AVX and you need a natural German voice: use chatterbox instead
+# (TTS_PROFILE=quality, ~3 GB, torch on the GPU, no UCX anywhere).
+#
+# Otherwise NOT TESTED HERE -- this environment has no GPU and no docker
+# daemon. The route, the request fields and the 24 kHz PCM follow the vLLM-Omni
+# speech API docs. Watch the first start:  docker compose logs -f voxtral
 
 services:
   voxtral:
@@ -37,7 +56,10 @@ services:
     # and vllm must share a major.minor, which this image already does.
     image: "${VOXTRAL_IMAGE:-vllm/vllm-omni:v0.30.0}"
     container_name: voxtral-tts
-    restart: on-failure:5
+    # No restart loop: the failure mode that actually happens here is a CPU
+    # that cannot run the image, and retrying that five times only buries the
+    # one line of the log that says why.
+    restart: "no"
 
     # Host networking so 127.0.0.1:8092 reaches it from the agent, same as the
     # rest of the stack.

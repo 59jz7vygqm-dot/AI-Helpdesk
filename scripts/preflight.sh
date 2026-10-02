@@ -154,6 +154,19 @@ if command -v docker >/dev/null 2>&1; then
       ;;
   esac
 
+  # vLLM's bundled UCX aborts at load time on a CPU without AVX, during dlopen,
+  # so it cannot be caught and no environment variable overrides it. Virtual
+  # machines are the usual cause: a CPU model like qemu64 hides AVX from the
+  # guest. Worth knowing before an 8.7 GB pull.
+  if [ -n "${VOXTRAL_GPU_FRACTION:-}" ] || [ "${TTS_BACKEND:-}" = "openai" ]; then
+    if grep -qo 'avx' /proc/cpuinfo 2>/dev/null; then
+      ok "CPU has AVX, so vLLM's bundled UCX will load"
+    else
+      bad "this CPU has no AVX -- vLLM-Omni segfaults on load (UCX), so Voxtral cannot run here"
+      hint "use chatterbox instead: echo TTS_PROFILE=quality >> .env && docker compose build"
+    fi
+  fi
+
   # A voice model that does not fit is a failed start after a multi-gigabyte
   # pull, and gpu-memory-utilization is a fraction of TOTAL memory, not of what
   # is free -- which is the arithmetic that is easy to get wrong.

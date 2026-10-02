@@ -203,6 +203,10 @@ DEFAULTS: Dict[str, Any] = {
         # the same GPU as synthesis, so this trades GPU load against latency.
         "live_interval_ms": 500,
         "live_min_audio_ms": 600,
+        # Quieter than this and the recogniser's own VAD discards the whole
+        # buffer anyway, so the pass is GPU cost with no result -- and that GPU
+        # also synthesises the reply, so the cost lands on the voice.
+        "live_min_level_db": -50.0,
         "echo_guard": True,
         "echo_attenuation_db": 12.0,
         "echo_correlation": 0.72,
@@ -250,6 +254,10 @@ DEFAULTS: Dict[str, Any] = {
         "ring_before_answer": True,
     },
     "logging": {
+        # Log the whole prompt and reply for every turn. Off by default: it is
+        # several kilobytes per turn and carries the caller's own words. Turn it
+        # on to answer "why did it hand over when the knowledge was there".
+        "log_prompts": False,
         "level": "INFO",
         "transcript_dir": "",
         "metrics": True,
