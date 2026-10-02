@@ -217,14 +217,21 @@ class HelpdeskApplication:
         if rtf <= 0.5:
             log.info("voice speed: rtf %.2f (%.1fs for %.1fs of speech)", rtf, elapsed, audio_s)
             return
+        # Never recommend the backend that is already running: the first version
+        # of this told a chatterbox install to try chatterbox.
+        backend = str(self.config["tts"].get("backend") or "").lower()
+        alternatives = [name for name in ("piper", "chatterbox") if name != backend]
+        advice = " or ".join(alternatives) or "a faster backend"
         level = log.warning if rtf > 1.0 else log.info
         level(
-            "voice speed: rtf %.2f -- %.1fs to synthesise %.1fs of speech.%s Try piper, "
-            "or chatterbox with TTS_PROFILE=quality.",
-            rtf, elapsed, audio_s,
+            "voice speed: rtf %.2f -- %.1fs to synthesise %.1fs of speech (backend %s).%s"
+            " Try %s. If live_asr is on, it competes for the same GPU: set"
+            " vad.live_asr: false and measure again before changing the voice.",
+            rtf, elapsed, audio_s, backend or "?",
             " Above 1.0 the voice cannot keep up with a call: the caller waits"
             " through every sentence." if rtf > 1.0 else
             " Noticeable at the start of each turn.",
+            advice,
         )
 
     def _build_account(self) -> SipAccount:
@@ -264,6 +271,7 @@ class HelpdeskApplication:
             options=self.config["llm"].get("options") or {},
             extra_instructions=dialog.get("extra_instructions", ""),
             mode=dialog.get("mode", "helpdesk"),
+            log_prompts=bool(self.config["logging"].get("log_prompts", False)),
         )
         session = CallSession(
             call,

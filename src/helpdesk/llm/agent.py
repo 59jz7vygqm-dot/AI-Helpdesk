@@ -203,6 +203,7 @@ class HelpdeskAgent:
         options: Optional[Dict] = None,
         extra_instructions: str = "",
         mode: str = "helpdesk",
+        log_prompts: bool = False,
     ) -> None:
         self.client = client
         self.kb = knowledge_base
@@ -215,6 +216,9 @@ class HelpdeskAgent:
         self.options = options or {}
         self.extra_instructions = extra_instructions
         self.mode = (mode or "helpdesk").lower()
+        #: log the full prompt and reply. Off by default: it is several
+        #: kilobytes per turn and the prompt carries the caller's words.
+        self.log_prompts = bool(log_prompts)
         self.system_prompt_template = (
             system_prompt or SYSTEM_PROMPTS.get(self.mode, DEFAULT_SYSTEM_PROMPT)
         )
@@ -325,6 +329,25 @@ class HelpdeskAgent:
             )
         else:
             self.repeated = 0
+
+        # Why the agent handed over instead of answering is otherwise not
+        # answerable from a log: a call transferred on a 0.73 retrieval hit and
+        # nothing in the log said whether the knowledge had reached the model,
+        # or whether the model had it and chose to hand over anyway.
+        if marker_filter.action is not Action.NONE:
+            log.info(
+                "action %s after %r -- %d chars of knowledge in the prompt%s",
+                marker_filter.action.value,
+                user_text[:50],
+                len(context or ""),
+                f" from {', '.join(retrieved)}" if retrieved else " (nothing retrieved)",
+            )
+            if not context:
+                log.info("no knowledge was retrieved, so handing over is correct")
+        if self.log_prompts:
+            log.info("PROMPT >>>\n%s", "\n---\n".join(
+                f"[{m.get('role')}] {m.get('content', '')}" for m in messages))
+            log.info("REPLY  >>> %r (action %s)", text, marker_filter.action.value)
 
         self.last_reply = AgentReply(
             text=text,

@@ -208,6 +208,10 @@ vad:
   live_asr: true
   live_interval_ms: 500
   live_min_audio_ms: 600
+  # Leiser als das verwirft die Erkennung den Puffer ohnehin ganz, der
+  # Durchlauf ist dann reine GPU-Last -- und zwar auf derselben GPU, die
+  # auch synthetisiert, der Preis landet also bei der Stimme.
+  live_min_level_db: -50.0
 
   # Echo guard: stops the agent's own voice, echoed back by a speakerphone or
   # mobile, from being mistaken for the caller interrupting. Compares incoming
@@ -283,6 +287,11 @@ dialog:
   ring_before_answer: true
 
 logging:
+  # Den ganzen Prompt und die Antwort pro Zug mitschreiben. Standardmaessig
+  # aus: mehrere Kilobyte pro Zug, und der Prompt enthaelt die Worte des
+  # Anrufers. Einschalten, um zu klaeren, warum weitergeleitet wurde,
+  # obwohl das Wissen da war.
+  log_prompts: false
   level: INFO                       # DEBUG prints per-stage timings
   transcript_dir: /app/transcripts  # one JSON per call; empty disables
   metrics: true

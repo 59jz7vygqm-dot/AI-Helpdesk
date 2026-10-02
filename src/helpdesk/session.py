@@ -30,7 +30,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from .audio.codec import resample
+from .audio.codec import resample, rms_dbfs
 from .audio.vad import BargeInDetector, Endpointer, EndpointerConfig, VadEvent, build_vad
 from .llm.agent import Action, HelpdeskAgent
 from .metrics import CallMetrics, TurnMetrics
@@ -128,6 +128,9 @@ class CallSession:
         self.live_interval_ms = int(vad_config.get("live_interval_ms", 500))
         #: no point recognising less than this; it only yields noise words
         self.live_min_audio_ms = int(vad_config.get("live_min_audio_ms", 600))
+        #: quieter than this and the recogniser discards the whole buffer
+        #: anyway, so the pass is pure GPU cost
+        self.live_min_level_db = float(vad_config.get("live_min_level_db", -50.0))
         self._speculative_result = None
 
         vad = build_vad(vad_config.get("backend", "auto"), int(vad_config.get("aggressiveness", 2)))
@@ -486,6 +489,16 @@ class CallSession:
         if buffered.size < TELEPHONY_RATE * self.live_min_audio_ms / 1000:
             return
         if buffered.size - self._live_covered < TELEPHONY_RATE * self.live_interval_ms / 1000:
+            return
+        # A real call opened with seven passes on audio at -58 to -44 dBFS, all
+        # of which the recogniser's own VAD then threw away whole. Each was a
+        # full encode on the GPU that also synthesises the reply, so the cost
+        # landed on the voice. The VAD that opened the turn is more permissive
+        # than the recogniser's, so the level is checked here too.
+        level = rms_dbfs(buffered)
+        if level < self.live_min_level_db:
+            log.debug("skipping live pass: %.1f dBFS is below %.1f",
+                      level, self.live_min_level_db)
             return
         self._live_covered = buffered.size
         self._live_passes += 1
