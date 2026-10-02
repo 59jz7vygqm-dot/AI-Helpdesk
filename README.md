@@ -172,17 +172,37 @@ das unser `openai`-Backend schon spricht.** Es gibt also keinen neuen
 TTS-Code im Agenten, und die Stimme läuft in einem eigenen Prozess, wo ein
 langsames Modell die Anrufschleife nicht blockieren kann.
 
+**Vorher den freien Speicher prüfen** — das entscheidet, ob es überhaupt passt:
+
+```bash
+nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv
+```
+
+Die Rechnung: 4 Mrd. Parameter in bf16 sind **8 GB allein für die Gewichte**,
+dazu der KV-Cache. Auf einer 23-GB-L4 liegen daneben noch Whisper (~2 GB) und
+das Sprachmodell in Ollama (~5 GB). `VOXTRAL_GPU_FRACTION` ist der Anteil, den
+vLLM *gesamt* belegt, Cache eingerechnet — 0,35 wären genau die Gewichte und der
+Server stirbt beim Start. 0,45 sind ~10 GB.
+
+Bleiben weniger als ~11 GB frei, passt Voxtral nicht neben den Rest. Dann ist
+Chatterbox (~3 GB) der pragmatische Weg.
+
 In `.env`:
 
 ```bash
 COMPOSE_FILE=docker-compose.yml:docker-compose.voxtral.yml
-VOXTRAL_GPU_FRACTION=0.35     # Whisper braucht Platz auf derselben Karte
+VOXTRAL_GPU_FRACTION=0.45
 ```
 
 ```bash
 sudo docker compose up -d --build
-sudo docker compose logs -f voxtral     # erster Start lädt das Modell
+sudo docker compose logs -f voxtral     # ~8,7 GB Image, dann ~9 GB Modell
 ```
+
+Das Image ist **`vllm/vllm-omni`**, nicht `vllm/vllm-openai`: `--omni` steckt im
+`vllm-omni`-Paket, im normalen Serving-Image ist es ein unbekanntes Argument.
+Der Tag ist festgenagelt (`v0.30.0`) — ein Sprachserver, der sich unter einer
+Telefonanlage selbst aktualisiert, ist kein Feature.
 
 **Vor dem ersten Anruf den Server direkt fragen** — das spart eine Runde, falls
 der Stimmenname nicht stimmt:
