@@ -98,7 +98,53 @@ async def main() -> int:
         print(f"FAIL text not normalised: {spoken!r}")
         failed += 1
 
-    # 4. Cancellation must stop consuming mid-stream
+    # 4. Voxtral TTS needs "stream" and "language"; a server that does not know
+    # a field answers 400, so an unset field must not be sent at all.
+    received.clear()
+    lean = OpenAiCompatibleSynthesizer(
+        base_url=f"http://127.0.0.1:{port}/v1", model="m", voice="v", sample_rate=RATE,
+    )
+    await lean.synthesize("Ein Satz.")
+    sent = received[-1]
+    checks = {
+        "streaming requested by default": sent.get("stream") is True,
+        "language omitted when unset": "language" not in sent,
+        "speed omitted at 1.0": "speed" not in sent,
+    }
+    await lean.close()
+
+    received.clear()
+    voxtral = OpenAiCompatibleSynthesizer(
+        base_url=f"http://127.0.0.1:{port}/v1",
+        model="mistralai/Voxtral-4B-TTS-2603",
+        voice="casual_female",
+        language="German",
+        speed=1.1,
+        sample_rate=RATE,
+    )
+    await voxtral.synthesize("Ein Satz.")
+    sent = received[-1]
+    checks.update({
+        "language sent when set": sent.get("language") == "German",
+        "voice sent when set": sent.get("voice") == "casual_female",
+        "speed sent when not 1.0": abs(sent.get("speed", 0) - 1.1) < 1e-6,
+    })
+    await voxtral.close()
+
+    received.clear()
+    plain = OpenAiCompatibleSynthesizer(
+        base_url=f"http://127.0.0.1:{port}/v1", model="m", voice="v",
+        request_stream=False, sample_rate=RATE,
+    )
+    await plain.synthesize("Ein Satz.")
+    checks["streaming can be turned off"] = "stream" not in received[-1]
+    await plain.close()
+
+    for name, ok in checks.items():
+        print(("PASS " if ok else "FAIL ") + name)
+        failed += 0 if ok else 1
+
+    # 5. Cancellation must stop consuming mid-stream
     cancel = asyncio.Event()
     cancel.set()
     chunks = [c async for c in synth.stream("Ein langer Satz der abgebrochen wird.", cancel=cancel)]

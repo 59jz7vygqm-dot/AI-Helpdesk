@@ -162,6 +162,60 @@ tts:
     reference_audio: /models/piper/meine-stimme.wav
 ```
 
+**Stufe 0: Voxtral TTS** — der aussichtsreichste Kandidat, und der mit dem
+geringsten Aufwand.
+
+`mistralai/Voxtral-4B-TTS-2603`, offene Gewichte von Mistral, neun Sprachen
+inklusive Deutsch. Entscheidend: vLLM-Omni serviert es auf
+`/v1/audio/speech` mit `stream: true` und 24-kHz-PCM — **genau das Protokoll,
+das unser `openai`-Backend schon spricht.** Es gibt also keinen neuen
+TTS-Code im Agenten, und die Stimme läuft in einem eigenen Prozess, wo ein
+langsames Modell die Anrufschleife nicht blockieren kann.
+
+In `.env`:
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.voxtral.yml
+VOXTRAL_GPU_FRACTION=0.35     # Whisper braucht Platz auf derselben Karte
+```
+
+```bash
+sudo docker compose up -d --build
+sudo docker compose logs -f voxtral     # erster Start lädt das Modell
+```
+
+**Vor dem ersten Anruf den Server direkt fragen** — das spart eine Runde, falls
+der Stimmenname nicht stimmt:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8092/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"mistralai/Voxtral-4B-TTS-2603",
+       "input":"Guten Tag, hier ist der Service.",
+       "voice":"casual_female","language":"German",
+       "response_format":"wav"}' --output /tmp/probe.wav && ls -l /tmp/probe.wav
+```
+
+Kommt ein 400 zurück, steht der Grund im Text — meist ein unbekannter
+`voice`-Name. Dann `VOXTRAL_VOICE` in `.env` anpassen. Ich kenne die vollständige
+Stimmenliste nicht; `casual_female` und `vivian` stehen in der vLLM-Omni-Doku.
+
+Danach sagt der Agent beim Start, was die Stimme wirklich leistet:
+
+```
+voice backend: openai
+voice speed: rtf <gemessen> (<x>s für <y>s Sprache)
+```
+
+**Ungetestet** — diese Entwicklungsumgebung hat keine GPU und keinen
+Docker-Daemon. Route, Felder und 24-kHz-PCM folgen der
+[vLLM-Omni Speech-API-Doku](https://docs.vllm.ai/projects/vllm-omni/en/stable/serving/speech_api/),
+und die Anfrage-Form ist gegen einen nachgebauten Server getestet
+(`tests/test_openai_tts.py`): `stream` und `language` werden gesendet, wenn
+gesetzt, und weggelassen, wenn nicht — ein strenger Server antwortet auf ein
+unbekanntes Feld mit 400, und ein TTS-Backend, das 400 liefert, ist ein
+stummer Anruf.
+
 **Stufe 2: Qwen3-TTS** — nicht für laufende Anrufe. Gemessen auf einer Tesla L4:
 
 ```

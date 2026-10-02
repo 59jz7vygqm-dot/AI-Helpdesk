@@ -1,0 +1,80 @@
+# Voxtral TTS (mistralai/Voxtral-4B-TTS-2603) as a voice server.
+#
+# Why this instead of Qwen3-TTS in the agent image: vLLM-Omni serves it on the
+# OpenAI-compatible /v1/audio/speech route with stream=true and 24 kHz PCM,
+# which is exactly the protocol the agent's `openai` backend already speaks.
+# So there is no new TTS code in the agent at all, and the voice runs in its
+# own process where a slow model cannot stall the call loop.
+#
+# Switch it on with a line in .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.voxtral.yml
+#
+# Combine with the local Asterisk by listing all three, colon-separated.
+#
+# NOT TESTED HERE -- this environment has no GPU and no docker daemon. The
+# route, the request fields and the 24 kHz PCM follow the vLLM-Omni speech API
+# docs; the first start is where you find out whether the image and the model
+# agree. Watch it:  docker compose logs -f voxtral
+
+services:
+  voxtral:
+    image: "${VOXTRAL_IMAGE:-vllm/vllm-openai:latest}"
+    container_name: voxtral-tts
+    restart: on-failure:5
+
+    # Host networking so 127.0.0.1:8092 reaches it from the agent, same as the
+    # rest of the stack.
+    network_mode: host
+
+    # --omni enables the speech routes. The port is deliberately not 8000:
+    # that is where a production vLLM usually already sits.
+    command: >
+      --model ${VOXTRAL_MODEL:-mistralai/Voxtral-4B-TTS-2603}
+      --omni
+      --port ${VOXTRAL_PORT:-8092}
+      --gpu-memory-utilization ${VOXTRAL_GPU_FRACTION:-0.35}
+      --max-model-len ${VOXTRAL_MAX_LEN:-2048}
+
+    environment:
+      HF_HOME: /models/hf
+      HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN:-}"
+      # Only this GPU, so it cannot land on a card another workload fills.
+      NVIDIA_VISIBLE_DEVICES: "${GPU_ID:-0}"
+
+    volumes:
+      - helpdesk-models:/models
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_ID:-0}"]
+              capabilities: [gpu]
+
+    shm_size: "4gb"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  helpdesk:
+    # Pinned here rather than left to config.yaml: starting this overlay means
+    # using this voice, and a leftover tts.backend in the file would otherwise
+    # quietly win -- which is exactly how an afternoon went to piper.
+    environment:
+      HELPDESK_TTS_BACKEND: "openai"
+      HELPDESK_TTS_OPENAI_BASE_URL: "http://127.0.0.1:${VOXTRAL_PORT:-8092}/v1"
+      HELPDESK_TTS_OPENAI_MODEL: "${VOXTRAL_MODEL:-mistralai/Voxtral-4B-TTS-2603}"
+      HELPDESK_TTS_OPENAI_RESPONSE_FORMAT: "pcm"
+      HELPDESK_TTS_OPENAI_SAMPLE_RATE: "24000"
+      HELPDESK_TTS_OPENAI_LANGUAGE: "${VOXTRAL_LANGUAGE:-German}"
+      HELPDESK_TTS_OPENAI_VOICE: "${VOXTRAL_VOICE:-casual_female}"
+      HELPDESK_TTS_OPENAI_STREAM: "true"
+    depends_on:
+      - voxtral
+
+volumes:
+  helpdesk-models:

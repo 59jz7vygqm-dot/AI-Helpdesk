@@ -29,6 +29,8 @@ class OpenAiCompatibleSynthesizer(Synthesizer):
         voice: str = "de_female",
         api_key: str = "none",
         response_format: str = "pcm",
+        language: str = "",
+        request_stream: bool = True,
         sample_rate: int = 24000,
         speed: float = 1.0,
         timeout: float = 30.0,
@@ -39,6 +41,14 @@ class OpenAiCompatibleSynthesizer(Synthesizer):
         self.voice = voice
         self.api_key = api_key
         self.response_format = response_format
+        #: Voxtral TTS needs the language named; servers that do not know the
+        #: field would reject it, so it is only sent when set.
+        self.language = language
+        #: Without this vLLM-Omni renders the whole sentence before answering,
+        #: which throws away the entire point of a streaming backend. Not named
+        #: `stream`: that is this class's own method, and assigning over it
+        #: turns every synthesis into "'bool' object is not callable".
+        self.request_stream = request_stream
         self.sample_rate = sample_rate
         self.speed = speed
         self.timeout = timeout
@@ -66,9 +76,16 @@ class OpenAiCompatibleSynthesizer(Synthesizer):
             "voice": self.voice,
             "input": prepared,
             "response_format": self.response_format,
-            "speed": self.speed,
-            **self.extra_body,
         }
+        # Only fields the server asked for. A strict server answers 400 to a
+        # field it does not know, and a TTS backend that 400s is a silent call.
+        if self.request_stream:
+            payload["stream"] = True
+        if self.language:
+            payload["language"] = self.language
+        if abs(self.speed - 1.0) > 1e-6:
+            payload["speed"] = self.speed
+        payload.update(self.extra_body)
         headers = {"Authorization": f"Bearer {self.api_key}"}
         async with session.post(
             f"{self.base_url}/audio/speech", json=payload, headers=headers

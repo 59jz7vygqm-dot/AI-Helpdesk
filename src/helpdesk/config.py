@@ -127,6 +127,12 @@ DEFAULTS: Dict[str, Any] = {
             "response_format": "pcm",
             "sample_rate": 24000,
             "speed": 1.0,
+            # Voxtral TTS wants the language named ("German"); Kokoro and
+            # OpenAI do not know the field. Empty means do not send it.
+            "language": "",
+            # Ask the server to stream. Without it vLLM-Omni renders the whole
+            # sentence first, which costs exactly what this backend exists for.
+            "stream": True,
         },
         "cache_dir": "/models/phrase-cache",
         # Deliberately small: the first chunk decides when the caller hears
