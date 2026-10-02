@@ -162,6 +162,60 @@ tts:
     reference_audio: /models/piper/meine-stimme.wav
 ```
 
+**Stufe 0: Voxtral TTS** — der aussichtsreichste Kandidat, und der mit dem
+geringsten Aufwand.
+
+`mistralai/Voxtral-4B-TTS-2603`, offene Gewichte von Mistral, neun Sprachen
+inklusive Deutsch. Entscheidend: vLLM-Omni serviert es auf
+`/v1/audio/speech` mit `stream: true` und 24-kHz-PCM — **genau das Protokoll,
+das unser `openai`-Backend schon spricht.** Es gibt also keinen neuen
+TTS-Code im Agenten, und die Stimme läuft in einem eigenen Prozess, wo ein
+langsames Modell die Anrufschleife nicht blockieren kann.
+
+In `.env`:
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.voxtral.yml
+VOXTRAL_GPU_FRACTION=0.35     # Whisper braucht Platz auf derselben Karte
+```
+
+```bash
+sudo docker compose up -d --build
+sudo docker compose logs -f voxtral     # erster Start lädt das Modell
+```
+
+**Vor dem ersten Anruf den Server direkt fragen** — das spart eine Runde, falls
+der Stimmenname nicht stimmt:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8092/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"mistralai/Voxtral-4B-TTS-2603",
+       "input":"Guten Tag, hier ist der Service.",
+       "voice":"casual_female","language":"German",
+       "response_format":"wav"}' --output /tmp/probe.wav && ls -l /tmp/probe.wav
+```
+
+Kommt ein 400 zurück, steht der Grund im Text — meist ein unbekannter
+`voice`-Name. Dann `VOXTRAL_VOICE` in `.env` anpassen. Ich kenne die vollständige
+Stimmenliste nicht; `casual_female` und `vivian` stehen in der vLLM-Omni-Doku.
+
+Danach sagt der Agent beim Start, was die Stimme wirklich leistet:
+
+```
+voice backend: openai
+voice speed: rtf <gemessen> (<x>s für <y>s Sprache)
+```
+
+**Ungetestet** — diese Entwicklungsumgebung hat keine GPU und keinen
+Docker-Daemon. Route, Felder und 24-kHz-PCM folgen der
+[vLLM-Omni Speech-API-Doku](https://docs.vllm.ai/projects/vllm-omni/en/stable/serving/speech_api/),
+und die Anfrage-Form ist gegen einen nachgebauten Server getestet
+(`tests/test_openai_tts.py`): `stream` und `language` werden gesendet, wenn
+gesetzt, und weggelassen, wenn nicht — ein strenger Server antwortet auf ein
+unbekanntes Feld mit 400, und ein TTS-Backend, das 400 liefert, ist ein
+stummer Anruf.
+
 **Stufe 2: Qwen3-TTS** — nicht für laufende Anrufe. Gemessen auf einer Tesla L4:
 
 ```
@@ -646,12 +700,222 @@ Was man am ehesten anfasst:
 
 ---
 
+## Laufende Erkennung — transkribieren, während gesprochen wird
+
+Vorher wurde die ganze Äußerung gepuffert und dann transkribiert. Es gab ein
+Zwischenstück (`speculative_asr` startet bei 140 ms Stille), aber das war **ein**
+Durchlauf, keine laufende Erkennung.
+
+Das Problem war nicht die ASR-Latenz an sich, sondern ein Wettlauf, den der
+semantische Endpoint nicht gewinnen konnte:
+
+| | |
+|---|---|
+| Frühester Zeitpunkt, an dem er feuern konnte | 140 ms (Startmarke) + ~300 ms (Erkennung) = **~440 ms** |
+| Wann der normale Hangover ohnehin greift | `end_silence_ms` = **320 ms** |
+
+Er kam also fast immer zu spät, und der Hangover wurde auf **jedem** Zug voll
+bezahlt. Mit einer laufenden Hypothese kann er beim **ersten stillen Frame**
+feuern, also bei 20–40 ms.
+
+Dazu wird der Puffer während des Sprechens alle `live_interval_ms` neu
+transkribiert. Festgeschrieben wird nur, worauf sich **zwei aufeinanderfolgende
+Durchläufe einigen** (LocalAgreement-2, nach
+[Macháček et al.](https://arxiv.org/abs/2307.14743)) — Whisper schreibt den
+eigenen Schluss um, sobald mehr Audio da ist, und setzt hinter alles einen
+Punkt, auch hinter einen halben Satz. Würde man dem letzten Stand glauben,
+schneidet man Anrufern mitten im Satz das Wort ab.
+
+```yaml
+vad:
+  live_asr: true
+  live_interval_ms: 500        # neues Audio, bevor der nächste Durchlauf startet
+  live_min_audio_ms: 600       # darunter kommt nur Rauschen heraus
+```
+
+**Was es kostet, ehrlich:** jeder Durchlauf ist ein voller Encode auf derselben
+GPU, die auch synthetisiert. `live_interval_ms` ist deshalb genauso ein
+GPU-Last-Regler wie ein Latenz-Regler. Es läuft immer nur **ein** Durchlauf
+gleichzeitig — mehrere würden die GPU hinter den Anrufer setzen statt vor ihn.
+
+**Ob es sich lohnt, steht in der Logzeile:**
+
+```
+turn 1: response 640 ms (asr 180*/5live, kb 12, llm_ttft 95, tts 210)
+        utterance 1480 ms, reply 62 chars, endpoint at 40 ms silence
+```
+
+`5live` sind die Durchläufe, `endpoint at 40 ms silence` heißt, der semantische
+Endpoint hat gefeuert statt des Hangovers. **Viele `live`-Durchläufe ohne
+`endpoint at …` sind Kosten ohne Nutzen** — dann `live_interval_ms` hoch oder
+`live_asr: false`.
+
+Bei sehr kurzen Äußerungen bringt es wenig: unter ~`live_min_audio_ms` läuft
+gar kein Durchlauf, und bei 1,5 Sekunden Sprache ist nur ein Durchlauf drin.
+Der Gewinn wächst mit der Länge der Äußerung.
+
+---
+
+## Eigener Asterisk davor — wenn die PBX fremdverwaltet ist
+
+Der Agent registriert sich als normale Nebenstelle, damit er mit einer verwalteten
+PBX auskommt: keine Dialplan-Zeile, kein ARI-Zugang, nur Zugangsdaten. Das ist
+der einfachste Weg und kostet einen RTP-Hop weniger.
+
+Mit einem eigenen Asterisk dazwischen bekommst du den Dialplan zurück:
+
+```
+Anbieter-PBX  --Registrierung als 1250-->  lokaler Asterisk  --Nebenstelle 7000-->  Agent
+```
+
+Der lokale Asterisk registriert sich wie ein Tischtelefon bei der Anbieter-PBX,
+mit einer **eigenen** Nummer. Der Agent registriert sich bei ihm.
+
+### Einschalten
+
+Beides liegt in diesem Repo, nicht in einem zweiten: ein `.env`, ein `git pull`,
+ein `docker compose up -d`. Bei getrennten Repos müssten Ports und Zugangsdaten
+über eine Repo-Grenze hinweg übereinstimmen — genau die Art Aufteilung, die
+schon einmal dazu geführt hat, dass die Konfiguration das eine sagte und der
+Container das andere tat.
+
+In `.env`:
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml
+
+# Die Anbieter-PBX und die NEUE Nummer, die sie für diesen Asterisk ausgegeben hat
+PROVIDER_HOST=172.16.0.188
+PROVIDER_USER=1250
+PROVIDER_PASSWORD=...
+
+# Der Agent, jetzt eine Nebenstelle auf dem lokalen Asterisk
+SIP_USERNAME=7000
+SIP_PASSWORD=ein-lokales-passwort
+SIP_BIND_PORT=5080
+
+# Wohin unbeantwortete und weitergeleitete Anrufe gehen
+TRANSFER_NUMBER=1272
+```
+
+Dann wie immer:
+
+```bash
+sudo docker compose up -d --build
+sudo docker compose logs -f
+```
+
+`COMPOSE_FILE` in `.env` ist der Trick: `docker compose` liest es von selbst, du
+musst dir also kein längeres Kommando merken. Zeile raus, und der Asterisk ist
+wieder weg.
+
+`SIP_SERVER_HOST` zeigt der Agent-Container danach selbst auf `127.0.0.1` — das
+setzt die Overlay-Datei, damit eine alte Zeile in `.env` ihn nicht
+versehentlich direkt zur PBX schickt, wo sich beide um dieselbe Registrierung
+streiten würden.
+
+### Was das bringt
+
+* **Rückfall auf einen Menschen.** Antwortet der Agent nicht in
+  `AGENT_RING_SECONDS` — Container startet neu, Modell lädt, Image wird
+  gebaut —, klingelt der Dialplan bei `TRANSFER_NUMBER`. Der Anrufer landet nie
+  auf einer toten Nummer. Das ist der Punkt, den der Agent für sich selbst
+  prinzipiell nicht lösen kann.
+* **Weiterleitung ohne Tricks.** REFER und die DTMF-Rückfallebene existieren nur,
+  weil manche PBX `allow_transfer=no` setzt. Hier ist es ein `Dial()`.
+* **Aufzeichnung, Warteschlangen, Zeitsteuerung, mehrere Agenten auf einer
+  Nummer** — alles Dialplan, kein Anwendungscode.
+* **AudioSocket und ARI** werden möglich, also auch die gepflegten Projekte
+  (Agent Voice Response und andere), ohne an der Anbieter-PBX etwas zu ändern.
+
+### Was es kostet
+
+* Ein Dienst mehr, der laufen muss. Fällt dessen Registrierung aus, ist die
+  Nummer tot — vorher hing das an einem Dienst, jetzt an zwei.
+* Ein zusätzlicher RTP-Hop. Im LAN Einzelstellen von Millisekunden, gegen ~700 ms
+  Antwortzeit also nichts — **solange nicht transcodiert wird.** Beide Beine sind
+  deshalb auf `alaw` festgenagelt.
+* Zwei Audio-Beine heißen zwei Gelegenheiten für einseitigen Ton.
+
+### Die zwei Kollisionen, die das sonst sofort zerlegen
+
+Bei `network_mode: host` gibt es kein Docker-NAT, das sie verdeckt.
+
+1. **SIP-Port 5060.** Asterisk nimmt ihn, der Agent geht auf `SIP_BIND_PORT`.
+2. **RTP-Bereich.** Asterisks Standard ist **10000–20000** und enthält den
+   Bereich des Agenten (**16000–16200**). Beide Prozesse greifen dann nach
+   denselben Ports, der Anruf kommt zustande und ist **stumm**. Die
+   Overlay-Datei setzt Asterisk deshalb auf 10000–15999.
+
+### Zugangsdaten: zwei Konten, nicht eins
+
+`PROVIDER_USER` und `SIP_USERNAME` müssen verschieden sein. Ein Satz
+Zugangsdaten ist ein Gerät: registrieren sich lokaler Asterisk und Agent beide
+als dieselbe Nebenstelle, verwirft die PBX eine der beiden Registrierungen —
+und zwar sporadisch, was stundenlanges Suchen bedeutet.
+
+### Konfiguration
+
+Sie wird beim Start aus `asterisk/templates/*.tmpl` gerendert, damit Passwörter
+in `.env` bleiben und nicht in einer Image-Schicht. Anpassen heißt: Template
+ändern, dann `docker compose restart asterisk`.
+
+Der Entrypoint weigert sich zu starten, wenn etwas leer gerendert hat. Das ist
+nicht vorsorglich gemeint — beim Bauen passierte genau das zweimal: `envsubst`
+liest die Umgebung, nicht die Shell, also wurde aus einer gesetzten aber nicht
+exportierten Variable ein stilles `Dial(PJSIP/,)` und ein `server_uri` ohne
+Port. Eine Konfiguration, die lädt, registriert und nichts tut.
+
+Asterisks eigene `${EXTEN}` und `${DIALSTATUS}` überleben das Rendern; es werden
+nur die Namen ersetzt, die der Entrypoint selbst kennt.
+
+**Getestet ist das Rendern, nicht der Betrieb** — in dieser Entwicklungsumgebung
+gibt es keinen Docker-Daemon und keine PBX. Die pjsip-Struktur folgt der
+offiziellen Doku zu
+[res_pjsip_outbound_registration](https://docs.asterisk.org/Certified-Asterisk_18.9_Documentation/API_Documentation/Module_Configuration/res_pjsip_outbound_registration),
+inklusive der `type=transport`-Sektion, ohne die pjsip überhaupt nicht lauscht.
+
+### Diagnose, in dieser Reihenfolge
+
+```bash
+sudo docker compose logs -f asterisk
+sudo docker compose exec asterisk asterisk -rx 'pjsip show registrations'
+sudo docker compose exec asterisk asterisk -rx 'pjsip show endpoints'
+sudo docker compose exec asterisk asterisk -rx 'pjsip set logger on'   # SIP-Mitschnitt
+```
+
+`pjsip show registrations` muss `Registered` zeigen. Steht dort
+`Rejected`, lehnt die Anbieter-PBX ab: falsches Passwort, oder sie erlaubt
+keinen Asterisk mit diesen Daten.
+
+### Vorher mit dem Anbieter klären
+
+* Darf sich ein Asterisk mit diesen Zugangsdaten registrieren? Manche Anbieter
+  prüfen den User-Agent oder verbieten Trunking im Vertrag.
+* Eine eigene Nummer für den lokalen Asterisk, siehe oben.
+
+### Ob es sich lohnt
+
+Für den Demo-Betrieb: nein, die direkte Registrierung ist weniger beweglich und
+läuft schon.
+
+Für den Produktivbetrieb: ja — vor allem wegen des Rückfalls auf einen Menschen.
+Ein Agent, der sich selbst überwacht, kann nicht melden, dass er tot ist.
+
+---
+
 ## Fehlersuche
 
 **Registrierung schlägt fehl** — `sip.trace: true` setzen und Logs ansehen. Meist
 falsches Passwort, oder die PBX erwartet einen separaten Auth-Namen
 (`sip.auth_username`). Bei `403 Forbidden` lässt die PBX die IP des Containers
 nicht zu.
+
+**Kein Ton, und auf dem Host läuft noch ein Asterisk** — Asterisks
+Standard-RTP-Bereich ist 10000-20000 und überlappt den des Agenten
+(16000-16200). Bei `network_mode: host` greifen beide nach denselben Ports.
+`RTP_PORT_START`/`RTP_PORT_END` oder Asterisks `rtpstart`/`rtpend` verschieben;
+siehe den Abschnitt "Eigener Asterisk davor".
 
 **Verbindung steht, aber kein Ton** — fast immer Docker-Netzwerk. RTP handelt
 seine Ports im SDP aus, und Dockers NAT schreibt die nicht um. Deshalb steht
@@ -793,6 +1057,7 @@ src/helpdesk/
   app.py        Verdrahtung und Start
 config/         Konfiguration, kommentiert, plus drei VRAM-Profile
 knowledge/      Wissensdatenbank (Markdown)
+asterisk/       optionaler lokaler Asterisk (Templates + Entrypoint)
 scripts/        Preflight, Modelldownload, Pipeline-Test, Tests, Healthcheck
 tts-server/     Qwen3-TTS als eigener Dienst (Python 3.13, OpenAI-kompatibel)
 tests/          simulierte PBX, Session-, Verdrahtungs-, Unit- und TTS-Tests

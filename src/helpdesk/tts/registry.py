@@ -92,6 +92,8 @@ def build_synthesizer(config: dict) -> Synthesizer:
             response_format=oa.get("response_format", "pcm"),
             sample_rate=int(oa.get("sample_rate", 24000)),
             speed=float(oa.get("speed", 1.0)),
+            language=str(oa.get("language") or ""),
+            request_stream=bool(oa.get("stream", True)),
             extra_body=oa.get("extra_body") or {},
         )
 

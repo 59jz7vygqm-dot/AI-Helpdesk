@@ -1,0 +1,8 @@
+; Rendered from asterisk/templates/logger.conf.tmpl at container start.
+; Everything to stdout, so `docker compose logs -f asterisk` is the whole story
+; and nothing accumulates in a file inside the container.
+[general]
+dateformat=%F %T
+
+[logfiles]
+console => notice,warning,error

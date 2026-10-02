@@ -1,0 +1,85 @@
+; Rendered from asterisk/templates/pjsip.conf.tmpl at container start.
+; Edit the template, then: docker compose restart asterisk
+
+; ---------------------------------------------------------------- transport
+; Without a transport section pjsip does not listen at all, whatever else is
+; configured. This is the single most common reason a working-looking config
+; registers nothing.
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:${SIP_BIND_PORT}
+
+; ------------------------------------------- registration at the provider PBX
+; This Asterisk registers like a desk phone, with the number the provider
+; issued for it. Nothing has to be enabled on their side beyond the account.
+[provider-reg]
+type=registration
+transport=transport-udp
+outbound_auth=provider-auth
+client_uri=sip:${PROVIDER_USER}@${PROVIDER_HOST}
+server_uri=sip:${PROVIDER_HOST}:${PROVIDER_PORT}
+retry_interval=60
+forbidden_retry_interval=600
+expiration=300
+
+[provider-auth]
+type=auth
+auth_type=userpass
+username=${PROVIDER_USER}
+password=${PROVIDER_PASSWORD}
+
+[provider]
+type=endpoint
+context=from-provider
+; alaw only, on both legs, so nothing is transcoded. Transcoding costs latency
+; and quality for a call that is 8 kHz end to end anyway.
+disallow=all
+allow=alaw
+outbound_auth=provider-auth
+aors=provider-aor
+from_user=${PROVIDER_USER}
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+
+[provider-aor]
+type=aor
+contact=sip:${PROVIDER_HOST}:${PROVIDER_PORT}
+qualify_frequency=60
+
+; Match inbound requests from the PBX to the endpoint above, so they land in
+; the from-provider context instead of being rejected as anonymous. The section
+; name must differ from the endpoint's: pjsip.conf keys objects by name, so a
+; second [provider] section would collide with the endpoint rather than add to
+; it.
+[provider-identify]
+type=identify
+endpoint=provider
+match=${PROVIDER_HOST}
+
+; ------------------------------------------------- the agent, as extension
+[${AGENT_EXTEN}]
+type=endpoint
+context=from-agent
+disallow=all
+allow=alaw
+auth=agent-auth
+aors=agent-aor
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+
+[agent-auth]
+type=auth
+auth_type=userpass
+username=${AGENT_EXTEN}
+password=${AGENT_PASSWORD}
+
+[agent-aor]
+type=aor
+max_contacts=1
+remove_existing=yes
+qualify_frequency=30

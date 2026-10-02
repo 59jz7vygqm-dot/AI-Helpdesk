@@ -1,0 +1,28 @@
+; Rendered from asterisk/templates/extensions.conf.tmpl at container start.
+
+[general]
+static=yes
+writeprotect=yes
+
+[globals]
+
+; ------------------------------------------------- calls from the provider
+[from-provider]
+; Ring the agent. If it does not answer within AGENT_RING_SECONDS -- container
+; restarting, image rebuilding, model loading -- fall through to a human. This
+; fallback is the main thing a local Asterisk buys that the agent cannot do for
+; itself: the caller never reaches a dead number.
+exten => _X.,1,NoOp(inbound from provider to ${EXTEN})
+ same => n,Dial(PJSIP/${AGENT_EXTEN},${AGENT_RING_SECONDS})
+ same => n,NoOp(agent did not answer: ${DIALSTATUS})
+ same => n,Dial(PJSIP/${HUMAN_EXTEN}@provider,45)
+ same => n,Hangup()
+
+; ------------------------------------------------- calls from the agent
+[from-agent]
+; The agent transfers by calling a number. Everything goes back out through the
+; provider, so dialog.transfer_number becomes an ordinary Dial() here and
+; transfer_method stops mattering.
+exten => _X.,1,NoOp(agent is dialling ${EXTEN})
+ same => n,Dial(PJSIP/${EXTEN}@provider,60)
+ same => n,Hangup()

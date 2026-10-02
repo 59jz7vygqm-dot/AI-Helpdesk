@@ -1,0 +1,79 @@
+# A local Asterisk in front of the agent.
+#
+# It registers at the managed PBX with the number the provider issued for it,
+# the agent registers at this Asterisk, and the dialplan in between gives you
+# what the provider will not: a fallback to a human when the agent is down,
+# transfer as a plain Dial(), recording, queues.
+#
+# Simplest way to switch it on -- put this in .env, once:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml
+#
+# After that plain `docker compose up -d` includes it, with no longer command to
+# remember. Leave that line out and this file is simply not used.
+#
+# Diagnostics, in this order:
+#   docker compose logs -f asterisk
+#   docker compose exec asterisk asterisk -rx 'pjsip show registrations'
+#   docker compose exec asterisk asterisk -rx 'pjsip show endpoints'
+#   docker compose exec asterisk asterisk -rx 'pjsip set logger on'
+
+services:
+  asterisk:
+    build: ./asterisk
+    image: helpdesk-asterisk:latest
+    container_name: helpdesk-asterisk
+    restart: unless-stopped
+
+    # Same reason as the agent: RTP negotiates its ports inside SDP and Docker's
+    # NAT does not rewrite them.
+    network_mode: host
+
+    environment:
+      # The managed PBX, and the number the provider issued for THIS Asterisk.
+      # It must not be the same account the agent used to register directly:
+      # one set of credentials is one device, and the PBX will drop whichever
+      # registration it considers stale.
+      PROVIDER_HOST: "${PROVIDER_HOST:-${SIP_SERVER_HOST}}"
+      PROVIDER_PORT: "${PROVIDER_PORT:-5060}"
+      PROVIDER_USER: "${PROVIDER_USER}"
+      PROVIDER_PASSWORD: "${PROVIDER_PASSWORD}"
+
+      # The agent's extension on this Asterisk. The agent's own SIP_USERNAME /
+      # SIP_PASSWORD have to match these two.
+      AGENT_EXTEN: "${SIP_USERNAME:-7000}"
+      AGENT_PASSWORD: "${SIP_PASSWORD}"
+      # How long to ring the agent before falling back to a human. Keep it above
+      # the agent's own warmup: a container that is still loading models would
+      # otherwise send every caller to the fallback.
+      AGENT_RING_SECONDS: "${AGENT_RING_SECONDS:-20}"
+      # Unanswered and transferred calls go here, through the provider.
+      HUMAN_EXTEN: "${TRANSFER_NUMBER}"
+
+      # Asterisk listens on 5060, so the agent moves to SIP_BIND_PORT.
+      SIP_BIND_PORT: "5060"
+      # Stops short of the agent's 16000-16200. Overlapping ranges on host
+      # networking give you a call that connects and has no audio.
+      ASTERISK_RTP_START: "${ASTERISK_RTP_START:-10000}"
+      ASTERISK_RTP_END: "${ASTERISK_RTP_END:-15999}"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  helpdesk:
+    # The agent now talks to the local Asterisk, not to the provider. Pinned
+    # here rather than left to .env, because starting this overlay *means*
+    # going through the local Asterisk -- a stale SIP_SERVER_HOST would
+    # otherwise send the agent straight back to the PBX and both would fight
+    # over the same registration.
+    environment:
+      HELPDESK_SIP_SERVER_HOST: "127.0.0.1"
+      HELPDESK_SIP_SERVER_PORT: "5060"
+      HELPDESK_SIP_DOMAIN: "127.0.0.1"
+      HELPDESK_SIP_BIND_PORT: "${SIP_BIND_PORT:-5080}"
+      HELPDESK_SIP_ADVERTISE_HOST: "127.0.0.1"
+    depends_on:
+      - asterisk

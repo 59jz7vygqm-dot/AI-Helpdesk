@@ -121,6 +121,13 @@ class CallSession:
         #: remaining latency is: the hangover is paid on every single turn.
         self.semantic_endpointing = bool(vad_config.get("semantic_endpointing", True))
         self.semantic_min_words = int(vad_config.get("semantic_min_words", 3))
+        self.live_asr = bool(vad_config.get("live_asr", True))
+        #: new audio needed before another pass is launched. Every pass is a
+        #: full encode of the buffer, on the same GPU as synthesis, so this is
+        #: a GPU-duty-cycle knob as much as a latency one.
+        self.live_interval_ms = int(vad_config.get("live_interval_ms", 500))
+        #: no point recognising less than this; it only yields noise words
+        self.live_min_audio_ms = int(vad_config.get("live_min_audio_ms", 600))
         self._speculative_result = None
 
         vad = build_vad(vad_config.get("backend", "auto"), int(vad_config.get("aggressiveness", 2)))
@@ -178,6 +185,23 @@ class CallSession:
         #: the in-flight reply pipeline for the current turn, cancelled on barge-in
         self._turn_task: Optional[asyncio.Task] = None
         self._speculative: Optional[asyncio.Task] = None
+        #: Running recognition while the caller is still talking. The point is
+        #: not a lower ASR latency for its own sake -- it is that the semantic
+        #: endpoint has a hypothesis ready at the first silent frame. Before
+        #: this it could not fire until speculative_silence_ms plus a whole
+        #: recognition had elapsed, which is longer than end_silence_ms, so it
+        #: lost the race to the plain hangover and that hangover was paid in
+        #: full on nearly every turn.
+        self._live: Optional[asyncio.Task] = None
+        self._live_result = None
+        #: the last two hypotheses, for the LocalAgreement-2 prefix
+        self._live_texts: List[str] = []
+        #: samples the most recently launched pass covered
+        self._live_covered = 0
+        self._live_passes = 0
+        #: silence at which the semantic endpoint fired, 0 when the plain
+        #: hangover ended the turn
+        self._endpoint_ms = 0
         self._barge_in_flag = False
         self._turn = 0
         self._done = asyncio.Event()
@@ -445,6 +469,93 @@ class CallSession:
         self._speculative_result = None
         self._speculative = asyncio.ensure_future(self._recognize(audio))
 
+    # ---- running recognition -------------------------------------------
+    def _maybe_start_live(self) -> None:
+        """Recognise the buffer so far, if enough new audio has arrived.
+
+        One pass at a time, always. Queueing passes would put the GPU behind
+        the caller instead of ahead of them, and the recogniser serialises on
+        its own lock anyway -- a second pass would just wait, holding a stale
+        hypothesis while the fresh audio sits unrecognised.
+        """
+        if not self.live_asr:
+            return
+        if self._live is not None and not self._live.done():
+            return
+        buffered = self.endpointer.utterance(trim_trailing_silence=False)
+        if buffered.size < TELEPHONY_RATE * self.live_min_audio_ms / 1000:
+            return
+        if buffered.size - self._live_covered < TELEPHONY_RATE * self.live_interval_ms / 1000:
+            return
+        self._live_covered = buffered.size
+        self._live_passes += 1
+        self._live = asyncio.ensure_future(self._recognize(buffered))
+
+    def _collect_live(self) -> None:
+        """Take the finished hypothesis, if there is one."""
+        task = self._live
+        if task is None or not task.done():
+            return
+        self._live = None
+        if task.cancelled():
+            return
+        try:
+            result = task.result()
+        except Exception:
+            log.debug("live recognition failed", exc_info=True)
+            return
+        if result is None or result.is_empty:
+            return
+        self._live_result = result
+        self._live_texts.append(result.text)
+        del self._live_texts[:-2]
+
+    def _committed_prefix(self) -> str:
+        """LocalAgreement-2: the prefix two consecutive hypotheses agree on.
+
+        Whisper happily rewrites the tail of its own output as more audio
+        arrives, so only the part that survived one more pass is trustworthy.
+        Used for logging and for judging completeness, never spoken.
+        """
+        if len(self._live_texts) < 2:
+            return ""
+        a, b = self._live_texts[-2].split(), self._live_texts[-1].split()
+        shared = 0
+        while shared < min(len(a), len(b)) and a[shared] == b[shared]:
+            shared += 1
+        return " ".join(b[:shared])
+
+    def _drop_live(self) -> None:
+        if self._live is not None:
+            self._live.cancel()
+            self._live = None
+        self._live_result = None
+        self._live_texts.clear()
+        self._live_covered = 0
+        # _live_passes and _endpoint_ms deliberately survive: they are read by
+        # the turn that this reset is clearing the way for.
+
+    def _finished_hypothesis(self) -> str:
+        """The transcript to answer now, or "" to keep waiting.
+
+        Prefers the speculative result, which was recognised on trimmed audio
+        and is what the turn will reuse. Falls back to the running hypothesis,
+        which is the whole point of live recognition: at the first silent frame
+        the speculative pass has not even started yet.
+        """
+        if self._speculative_is_complete():
+            return self._speculative_result.text
+        result = self._live_result
+        if result is None or result.is_empty:
+            return ""
+        # Judge the agreed prefix, not the latest guess: Whisper rewrites its
+        # own tail as audio arrives, and a sentence-final dot that vanishes on
+        # the next pass would have cut the caller off mid-thought.
+        if not self._looks_complete(self._committed_prefix()):
+            return ""
+        self._speculative_result = result
+        return result.text
+
     def _looks_complete(self, text: str) -> bool:
         """Whether a transcript reads as a finished utterance.
 
@@ -475,6 +586,7 @@ class CallSession:
             self._speculative.cancel()
             self._speculative = None
         self._speculative_result = None
+        self._drop_live()
 
     async def _finish_recognition(self, metrics: TurnMetrics):
         audio = self.endpointer.utterance(trim_trailing_silence=True)
@@ -697,16 +809,23 @@ class CallSession:
             self._turn_task = asyncio.ensure_future(self._run_turn())
             return
 
+        if self.endpointer.in_speech:
+            # Keep a hypothesis current while the caller talks, so the check
+            # below has something to judge at the very first silent frame.
+            self._collect_live()
+            self._maybe_start_live()
+
         # Still in the hangover: if what the caller said already reads as a
         # finished sentence, there is nothing to wait for.
-        if (
-            self.semantic_endpointing
-            and self.endpointer.silence_run > 0
-            and self._speculative_is_complete()
-        ):
-            log.debug("semantic endpoint: %r", (self._speculative_result.text or "")[:60])
-            self.endpointer.in_speech = False
-            self._turn_task = asyncio.ensure_future(self._run_turn())
+        if self.semantic_endpointing and self.endpointer.silence_run > 0:
+            self._collect_live()
+            text = self._finished_hypothesis()
+            if text:
+                self._endpoint_ms = self.endpointer.silence_run * 20
+                log.debug("semantic endpoint after %d ms of silence: %r",
+                          self._endpoint_ms, text[:60])
+                self.endpointer.in_speech = False
+                self._turn_task = asyncio.ensure_future(self._run_turn())
 
     def _cancel_turn(self) -> None:
         # Remember what the caller never got to hear, so a backchannel ("mhm")
@@ -736,6 +855,10 @@ class CallSession:
         metrics = TurnMetrics(turn=self._turn, speech_end_at=time.monotonic())
         metrics.barge_in = self._barge_in_flag
         self._barge_in_flag = False
+        metrics.live_passes = self._live_passes
+        metrics.endpoint_ms = self._endpoint_ms
+        self._live_passes = 0
+        self._endpoint_ms = 0
 
         # Decided before recognising, so no backend has to be trusted to have
         # its own floor: too little audio was never a sentence -- a cough, a
