@@ -1,35 +1,14 @@
-# Profile: Qwen3-TTS - the best German voice available locally.
+# Qwen3-TTS profile.
 #
-# Build the image with the qwen profile first, which installs the `qwen-tts`
-# package and torch (about 6 GB more image, ~15 minutes):
+# MEASURED ON A TESLA L4 AND NOT RECOMMENDED FOR LIVE CALLS: the first sentence
+# took 35.9s for 2.6s of speech (rtf 13.6), and warm sentences still ran at
+# roughly real time. A caller waits through every sentence. The model's built-in
+# speakers (aiden, dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu,
+# vivian) are not German voices, so German is spoken with an accent.
 #
-#   TTS_PROFILE=qwen sudo docker compose build
-#   sudo docker compose up -d
-#
-# No second container: the package needs only Python 3.9, so it runs inside the
-# agent image. It cannot be combined with chatterbox, which pins an incompatible
-# transformers version -- pick one.
-#
-#   Ollama  qwen2.5:7b-instruct Q4    ~5.2 GB   on the HOST, pin it to the same GPU
-#   ASR     large-v3-turbo int8       ~1.6 GB
-#   TTS     Qwen3-TTS 1.7B bfloat16   ~8.0 GB
-#   KB      fastembed (CPU)                0
-#   ------------------------------------------
-#                                    ~14.8 GB of a 23 GB L4
-#
-# Expect 300-700 ms to first audio against piper's ~60 ms. The log reports the
-# realtime factor; piper stays available via tts.backend if it is too slow.
-#
-# Copy over config/config.yaml to use it.
-
-# AI Helpdesk configuration.
-#
-# Every scalar here can be overridden from the environment as
-# HELPDESK_<SECTION>_<KEY>, nested keys included:
-#   HELPDESK_SIP_SERVER_HOST=10.0.0.1
-#   HELPDESK_VAD_END_SILENCE_MS=350
-#   HELPDESK_TTS_PIPER_MODEL_PATH=/models/piper/de_DE-thorsten-high.onnx
-# Keep the SIP password in the environment, not in this file.
+# Kept because it is the best quality per sentence if latency does not matter,
+# and because it documents how the backend is wired. For a natural German voice
+# on a call use quality-chatterbox.yaml (image built with TTS_PROFILE=quality).
 
 sip:
   username: "900"                  # the extension the PBX knows
@@ -105,8 +84,11 @@ tts:
   #              THE default: in every image, never stalls, no GPU.
   # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages.
   #              Needs an image built with TTS_PROFILE=quality.
-  # qwen3      - Qwen3-TTS. Best German voice, GPU. Needs an image built with
-  #              TTS_PROFILE=qwen -- without it the backend fails to import.
+  # qwen3      - Qwen3-TTS, GPU. NOT usable for a live call on an L4: measured
+  #              rtf 13.6 on the first sentence and 1-2 warm, so the caller
+  #              waits through every sentence. Its built-in speakers are not
+  #              German either, so German comes out accented. Needs an image
+  #              built with TTS_PROFILE=qwen. Fine for offline rendering.
   #              Careful: TTS_BACKEND in .env overrides this line.
   # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
   backend: qwen3

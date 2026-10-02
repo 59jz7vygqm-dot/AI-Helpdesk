@@ -140,6 +140,7 @@ class HelpdeskApplication:
                 f"HELPDESK_TTS_BACKEND / TTS_BACKEND in .env if set), or rebuild "
                 f"the image with TTS_PROFILE=quality for chatterbox."
             ) from exc
+        await self._check_voice_keeps_up()
         self.phrases = PhraseCache(
             self.synthesizer, target_rate=8000, cache_dir=config["tts"].get("cache_dir") or None
         )
@@ -187,6 +188,44 @@ class HelpdeskApplication:
                 log.warning("could not warm up knowledge retrieval", exc_info=True)
         await self.phrases.prepare_all(self.texts.fixed_phrases())
         log.info("warmup complete in %.1fs", time.monotonic() - started)
+
+    #: one sentence of ordinary length, used to time the voice honestly
+    _PROBE = "Der Drucker zeigt eine Meldung im Display, bitte lesen Sie sie mir vor."
+
+    async def _check_voice_keeps_up(self) -> None:
+        """Measure the voice against the clock and say plainly if it loses.
+
+        Run after warmup, so kernel compilation and model loading are already
+        paid for and this is the speed a caller will actually get. A real-time
+        factor above 1 means synthesis is slower than playback: the caller waits
+        for every sentence and no tuning elsewhere can close that gap. Sentences
+        are synthesised one at a time while the previous one plays, so even 0.5
+        is felt at the start of a turn.
+        """
+        started = time.monotonic()
+        try:
+            audio = await self.synthesizer.synthesize(self._PROBE)
+        except Exception:
+            log.debug("voice speed probe failed", exc_info=True)
+            return
+        rate = max(getattr(self.synthesizer, "sample_rate", 0) or 0, 1)
+        audio_s = audio.size / rate
+        if audio_s < 0.5:
+            return
+        elapsed = time.monotonic() - started
+        rtf = elapsed / audio_s
+        if rtf <= 0.5:
+            log.info("voice speed: rtf %.2f (%.1fs for %.1fs of speech)", rtf, elapsed, audio_s)
+            return
+        level = log.warning if rtf > 1.0 else log.info
+        level(
+            "voice speed: rtf %.2f -- %.1fs to synthesise %.1fs of speech.%s Try piper, "
+            "or chatterbox with TTS_PROFILE=quality.",
+            rtf, elapsed, audio_s,
+            " Above 1.0 the voice cannot keep up with a call: the caller waits"
+            " through every sentence." if rtf > 1.0 else
+            " Noticeable at the start of each turn.",
+        )
 
     def _build_account(self) -> SipAccount:
         sip_config = self.config["sip"]

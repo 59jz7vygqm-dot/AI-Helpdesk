@@ -729,6 +729,87 @@ async def test_real_interruption_does_ask_again():
     return True
 
 
+async def test_short_bargein_is_not_apologised_at():
+    """Interrupting with a short question must not trigger an apology loop.
+
+    What a slow voice did on the real line: the barge-in detector spent its
+    200 ms confirming the interruption, the utterance began only afterwards and
+    was too short to recognise, so the agent apologised -- talking over the
+    caller, who spoke again, which barged in on another fragment. Three rounds
+    of that and the caller hung up without a single turn being answered.
+    """
+    session, call, ua, synth, llm = await build_session(
+        ["Mein Drucker druckt nicht.", "Und was kostet das?"],
+        ["Ein langer erster Satz der weiterlaufen soll. Mit einem zweiten Satz. Und einem dritten.",
+         "Das kann ich nicht sagen."],
+        tts_delay=0.02,
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await feed(session, speech(30) + silence(15))
+    await wait_until(lambda: len(synth.spoken) >= 2, 5, "reply under way")
+
+    # Exactly the awkward case: just enough speech to barge in, then a pause.
+    # Before the fix the detector's own 200 ms was discarded and what reached
+    # the recogniser was whatever came after it.
+    requests_before = len(llm.requests)
+    for frame in speech(18):
+        session._on_audio(frame)
+        await asyncio.sleep(0.001)
+    await wait_until(lambda: call.rtp.cleared > 0, 3, "interrupted")
+    kept = session.endpointer.utterance_ms()
+    assert kept >= 240, f"only {kept} ms of the interruption survived the barge-in"
+    print(f"PASS the barge-in speech is kept, not discarded ({kept} ms in the utterance)")
+
+    await feed(session, silence(20), drain_first=False)
+    await wait_until(lambda: len(llm.requests) > requests_before, 6, "short question answered")
+    said = " ".join(synth.spoken)
+    assert "nicht verstanden" not in said, f"apologised instead of answering: {said!r}"
+    assert session.agent.misunderstood == 0, (
+        f"the interruption counted as a misunderstanding ({session.agent.misunderstood})")
+    print("PASS a short interruption reaches the model instead of an apology")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_tiny_fragment_is_ignored_silently():
+    """A blip below the recogniser's floor must produce no reply at all.
+
+    Apologising is what starts the loop: the agent talks, the caller talks over
+    it, that is another fragment. Saying nothing lets the caller finish.
+    """
+    session, call, ua, synth, llm = await build_session(
+        ["sollte nie erkannt werden"], ["sollte nie aufgerufen werden"],
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await wait_until(lambda: not call.rtp.is_playing(), 3, "greeting done")
+
+    spoken_before = len(synth.spoken)
+    requests_before = len(llm.requests)
+    # 120 ms of noise: a cough, a door, a handset being moved.
+    await feed(session, speech(6) + silence(25), drain_first=False)
+    await asyncio.sleep(0.4)
+
+    # The silence watchdog may legitimately ask "Sind Sie noch da?" here; what
+    # must not happen is an apology, a model call, or a counted misunderstanding.
+    answers = [t for t in synth.spoken[spoken_before:] if t != session.texts.still_there]
+    assert answers == [], f"replied to a blip: {answers}"
+    assert len(llm.requests) == requests_before, "asked the model about a blip"
+    assert session.agent.misunderstood == 0, "a blip counted as a misunderstanding"
+    print("PASS 120 ms of noise produced no reply and no misunderstanding")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
 async def test_echo_does_not_interrupt():
     """The agent's own voice echoing back must not cut it off."""
     session, call, ua, synth, llm = await build_session(
@@ -741,6 +822,13 @@ async def test_echo_does_not_interrupt():
     await feed(session, speech(30) + silence(15))
     await wait_until(lambda: call.rtp.sent_samples > 0 and synth.spoken, 5, "speaking")
 
+    # Let the first utterance's own frames clear the queue. They are loud, and
+    # a loud frame arriving during the echo phase is a real caller as far as the
+    # detector is concerned -- correctly, which is why it has to be waited out
+    # here rather than tolerated.
+    await wait_until(lambda: session._frames.empty(), 3, "frame queue drained")
+    await asyncio.sleep(0.1)
+
     cleared_before = call.rtp.cleared
     rng = np.random.default_rng(7)
     # Drive transmit and receive on the same tick, as the real pacing loop does:
@@ -748,10 +836,15 @@ async def test_echo_does_not_interrupt():
     # which is what a speakerphone echo looks like.
     call.rtp.stop_draining()
     call.rtp.on_sent = session._on_sent
+    # Dispatched directly rather than through the frame queue: the queue is
+    # drained by a task, so "queued" and "judged" are not the same instant, and
+    # a frame judged before any transmitted level was recorded leaves the echo
+    # guard with nothing to compare against. That ordering is guaranteed in the
+    # pacing loop -- audio is transmitted before its echo can come back -- so
+    # reproducing it here tests the guard instead of the scheduler.
     for _ in range(80):
         session._on_sent((rng.normal(0, 6000, 160)).astype(np.int16))
-        session._on_audio((rng.normal(0, 700, 160)).astype(np.int16))
-        await asyncio.sleep(0.002)
+        session._dispatch_frame((rng.normal(0, 700, 160)).astype(np.int16))
     await asyncio.sleep(0.2)
     assert call.rtp.cleared == cleared_before, "echo was treated as barge-in"
     assert session.barge_in.echo_rejected > 0, "echo guard never fired"
@@ -762,8 +855,7 @@ async def test_echo_does_not_interrupt():
     cleared_before = call.rtp.cleared
     for _ in range(40):
         session._on_sent((rng.normal(0, 6000, 160)).astype(np.int16))
-        session._on_audio((rng.normal(0, 5500, 160)).astype(np.int16))
-        await asyncio.sleep(0.002)
+        session._dispatch_frame((rng.normal(0, 5500, 160)).astype(np.int16))
     await asyncio.sleep(0.2)
     assert call.rtp.cleared > cleared_before, "a real caller at speech level was blocked"
     print("PASS a caller at comparable level still interrupts")
@@ -805,6 +897,8 @@ async def main() -> int:
         ("dtmf 0", test_dtmf_zero_transfers),
         ("backchannel resumes", test_backchannel_resumes_instead_of_restarting),
         ("real interruption asks again", test_real_interruption_does_ask_again),
+        ("short barge-in not apologised at", test_short_bargein_is_not_apologised_at),
+        ("tiny fragment ignored", test_tiny_fragment_is_ignored_silently),
         ("echo does not interrupt", test_echo_does_not_interrupt),
         ("transfer method passthrough", test_transfer_method_passed_through),
         ("farewell ends call", test_farewell_ends_the_call),

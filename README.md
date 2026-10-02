@@ -130,15 +130,28 @@ kann sie dann auf die Weiterleitungsnummer schicken.
 
 ### Bessere Stimme — der zweite Schritt
 
-**Stufe 1: Chatterbox** (natürlich, klonbar, MIT-Lizenz). Image neu bauen und
-umstellen:
+**Stufe 1: Chatterbox** (natürlich, klonbar, MIT-Lizenz, GPU ~3 GB). Für eine
+natürliche Stimme am Telefon ist das die realistische Wahl — Qwen ist dafür zu
+langsam, siehe Stufe 2. Image neu bauen und umstellen:
 
 ```bash
-TTS_PROFILE=quality docker compose build     # ~15 Min, zieht torch
+echo "TTS_PROFILE=quality" >> .env     # sudo löscht sonst die Variable
+sudo docker compose build              # ~15 Min, zieht torch
 cp config/profiles/quality-chatterbox.yaml config/config.yaml
-docker compose up -d
-docker compose exec helpdesk python3 /app/scripts/try_pipeline.py "Test"
+sudo docker compose up -d --build
+sudo docker compose exec helpdesk python3 /app/scripts/try_pipeline.py "Test"
 ```
+
+Nach dem Start steht im Log, was die Stimme wirklich kann:
+
+```
+voice backend: chatterbox
+voice speed: rtf <gemessen> (<x>s für <y>s Sprache)
+```
+
+Alles unter 0,5 ist für einen Anruf brauchbar, über 1,0 nicht — dann warnt der
+Start von selbst. Gemessen wird nach dem Warmlaufen an einem normalen Satz, also
+ohne Kernel-Kompilierung: das ist die Geschwindigkeit, die ein Anrufer bekommt.
 
 Eigene Stimme klonen — 10–20 Sekunden klare Aufnahme nach `./voices/` legen:
 
@@ -149,22 +162,39 @@ tts:
     reference_audio: /models/piper/meine-stimme.wav
 ```
 
-**Stufe 2: Qwen3-TTS** — das beste lokale Deutsch, Apache-2.0, vom Qwen-Team.
-Läuft im Agent-Image, kein zweiter Container:
+**Stufe 2: Qwen3-TTS** — nicht für laufende Anrufe. Gemessen auf einer Tesla L4:
+
+```
+qwen3-tts: 37 chars -> 2640 ms audio in 35857 ms (rtf 13.58)
+```
+
+35,9 Sekunden für 2,6 Sekunden Sprache beim ersten Satz, warm noch etwa Echtzeit.
+Ein Echtzeitfaktor über 1 heißt: der Anrufer wartet jeden Satz ab, und daran
+ändert keine Einstellung etwas. Dazu sind die eingebauten Sprecher (`aiden`,
+`dylan`, `eric`, `ono_anna`, `ryan`, `serena`, `sohee`, `uncle_fu`, `vivian`)
+keine deutschen Stimmen — Deutsch kommt mit Akzent heraus.
+
+**Für eine natürliche deutsche Stimme am Telefon ist Chatterbox (Stufe 1) die
+Antwort, nicht Qwen.** Qwen bleibt im Projekt für Fälle ohne Zeitdruck
+(Ansagen vorrendern, Vergleichsaufnahmen) und weil es dokumentiert, wie ein
+GPU-Backend angebunden wird.
+
+Wenn du es trotzdem hören willst:
 
 ```bash
-TTS_PROFILE=qwen sudo docker compose build       # ~15 Min, zieht torch
+echo "TTS_PROFILE=qwen" >> .env
+sudo docker compose build       # ~20 Min, zieht torch
 cp config/profiles/quality-qwen.yaml config/config.yaml
-sudo docker compose up -d && sudo docker compose logs -f
+sudo docker compose up -d --build && sudo docker compose logs -f
 ```
 
-Beim ersten Start lädt das Modell ~5 GB von Hugging Face. Achte auf diese beiden
-Zeilen — sie nehmen dir das Raten ab:
+Beim ersten Start lädt das Modell ~5 GB von Hugging Face. Achte auf diese Zeilen:
 
 ```
-language 'German' -> 'German'
-using speaker 'ethan' (available: aiden, ava, chelsie, cherry, dylan, ethan, ...)
-Qwen3-TTS warm: 24000 Hz, speaker='ethan', language='German', 1840 ms of audio
+voice backend: qwen3
+language 'German' -> 'german'
+using speaker 'aiden' (available: aiden, dylan, eric, ono_anna, ryan, ...)
+voice speed: rtf 13.58 -- 35.9s to synthesise 2.6s of speech. Above 1.0 ...
 ```
 
 Der Sprecher wird gegen die Liste des Modells geprüft: steht in der Konfiguration
@@ -172,6 +202,9 @@ nichts, nimmt es den ersten und protokolliert alle verfügbaren. Dann einen davo
 in `config/config.yaml` unter `tts.qwen3.speaker` eintragen. Dasselbe gilt für die
 Sprachbezeichnung — ein falscher Wert wird korrigiert, nicht quittiert mit einem
 Fehler mitten im Anruf.
+
+`voice speed:` wird nach dem Warmlaufen an einem normalen Satz gemessen, also mit
+schon kompilierten Kernels. Das ist die Geschwindigkeit, die ein Anrufer bekommt.
 
 **Wichtig zum Paketnamen:** Das richtige PyPI-Paket heißt **`qwen-tts`**. Es gibt
 außerdem ein `qwen3-tts`, das ist ein fremdes Kommandozeilen-Werkzeug für Apple
@@ -639,6 +672,21 @@ und auf einer vollen Karte in den RAM ausgelagert wurde — siehe Schritt 1b.
 **`out of memory` beim Start** — Container und Ollama liegen auf verschiedenen
 Karten, oder auf einer belegten. `nvidia-smi` zeigt, wer wo wie viel hält;
 `GPU_ID` und `CUDA_VISIBLE_DEVICES` müssen auf dieselbe freie Karte zeigen.
+
+**Er hört überhaupt nicht zu und entschuldigt sich nur** — im Log wechseln sich
+`barge-in on ...` und `nothing recognised` ab, `turns=0` am Ende. Das ist eine
+Schleife: der Anrufer redet dazwischen, der Agent antwortet mit „das habe ich
+nicht verstanden", redet damit über den Anrufer, dessen nächste Worte wieder
+dazwischenfunken. Zwei Dinge halten sie an, beide eingebaut:
+
+* Die Sprache, die den Barge-in *ausgelöst* hat, bleibt Teil der Äußerung. Vorher
+  verbrauchte der Detektor seine 200 ms und das Erkannte begann erst danach.
+* Unter `asr.min_utterance_ms` (350) wird gar nicht geantwortet, auch nicht
+  entschuldigt. Im Log steht dann `ignoring 140 ms of audio: too short`.
+
+Tritt es weiter auf, ist fast immer die Stimme zu langsam: solange der Agent
+synthetisiert, geht jede Silbe des Anrufers durch den Barge-in-Detektor statt
+durch den Endpointer. `voice speed:` beim Start prüfen.
 
 **Er fällt mir ins Wort** — `vad.end_silence_ms` hoch (500–600).
 **Er reagiert zu träge** — denselben Wert runter (300–350).
