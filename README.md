@@ -162,8 +162,35 @@ tts:
     reference_audio: /models/piper/meine-stimme.wav
 ```
 
-**Stufe 0: Voxtral TTS** — der aussichtsreichste Kandidat, und der mit dem
-geringsten Aufwand.
+**Stufe 0: Voxtral TTS** — braucht eine CPU mit AVX. Ohne die geht es nicht,
+und zwar aus einem Grund, der nichts mit diesem Projekt zu tun hat:
+
+```
+FATAL: UCX library was compiled with avx but CPU does not support it.
+!!!!!!! Segfault encountered !!!!!!!  ... in ucs_init
+```
+
+Die UCX-Bibliothek im vLLM-Image prüft beim Laden, ob die CPU die Instruktionen
+hat, mit denen sie kompiliert wurde, und beendet den Prozess, wenn nicht —
+während `dlopen`, also nicht abfangbar, und keine `UCX_*`-Variable hebelt das
+aus. Sie wird über eine Importkette erreicht, nicht über etwas Konfiguriertes,
+es gibt also nichts abzuschalten. Der Fix liegt upstream
+([ai-dynamo/nivl PR 2122](https://github.com/ai-dynamo/nixl/pull/2122): UCX ohne
+AVX bauen) und ist noch in keinem Release.
+
+Virtuelle Maschinen sind der übliche Grund — ein CPU-Modell wie `qemu64` oder
+`x86-64-v2` versteckt AVX vor dem Gast. **Vor dem 8,7-GB-Pull prüfen:**
+
+```bash
+grep -o 'avx[^ ]*' /proc/cpuinfo | sort -u     # leer = kein AVX
+```
+
+`preflight.sh` prüft das inzwischen selbst. Kein AVX und eine natürliche
+deutsche Stimme gebraucht: **Chatterbox** (Stufe 1) — torch auf der GPU, kein
+UCX, ~3 GB.
+
+Mit AVX ist es der aussichtsreichste Kandidat, und der mit dem geringsten
+Aufwand.
 
 `mistralai/Voxtral-4B-TTS-2603`, offene Gewichte von Mistral, neun Sprachen
 inklusive Deutsch. Entscheidend: vLLM-Omni serviert es auf
