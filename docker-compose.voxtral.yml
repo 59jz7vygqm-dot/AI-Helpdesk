@@ -12,6 +12,17 @@
 #
 # Combine with the local Asterisk by listing all three, colon-separated.
 #
+# Bring the stack DOWN first when switching to this voice:
+#
+#   docker compose down && docker compose up -d --build
+#
+# depends_on only orders starts. On a plain `up -d` this service loads its
+# model while the previous agent container is still holding the GPU -- and that
+# container holds whatever local TTS it was configured with, several gigabytes
+# of it. Both fit on a 23 GB card only by luck; `down` first removes the
+# question. Switching away from a local voice backend is also what frees that
+# memory in the first place, since the agent then only speaks HTTP.
+#
 # NOT TESTED HERE -- this environment has no GPU and no docker daemon. The
 # route, the request fields and the 24 kHz PCM follow the vLLM-Omni speech API
 # docs; the first start is where you find out whether the image and the model
@@ -19,7 +30,12 @@
 
 services:
   voxtral:
-    image: "${VOXTRAL_IMAGE:-vllm/vllm-openai:latest}"
+    # vllm-omni, NOT vllm-openai: --omni comes from the vllm-omni package and
+    # the plain serving image does not carry it, so there the flag is simply an
+    # unrecognised argument. Pinned rather than :latest -- a voice server that
+    # upgrades itself underneath a telephone system is not a feature. vllm-omni
+    # and vllm must share a major.minor, which this image already does.
+    image: "${VOXTRAL_IMAGE:-vllm/vllm-omni:v0.30.0}"
     container_name: voxtral-tts
     restart: on-failure:5
 
@@ -27,14 +43,16 @@ services:
     # rest of the stack.
     network_mode: host
 
-    # --omni enables the speech routes. The port is deliberately not 8000:
-    # that is where a production vLLM usually already sits.
+    # The entrypoint is set explicitly so the command does not depend on what
+    # the image happens to default to, and the model is positional, the way the
+    # vLLM-Omni docs give it. --omni is what enables the speech routes. The port
+    # is deliberately not 8000: a production vLLM usually already sits there.
+    entrypoint: ["vllm"]
     command: >
-      --model ${VOXTRAL_MODEL:-mistralai/Voxtral-4B-TTS-2603}
+      serve ${VOXTRAL_MODEL:-mistralai/Voxtral-4B-TTS-2603}
       --omni
       --port ${VOXTRAL_PORT:-8092}
-      --gpu-memory-utilization ${VOXTRAL_GPU_FRACTION:-0.35}
-      --max-model-len ${VOXTRAL_MAX_LEN:-2048}
+      --gpu-memory-utilization ${VOXTRAL_GPU_FRACTION:-0.45}
 
     environment:
       HF_HOME: /models/hf
