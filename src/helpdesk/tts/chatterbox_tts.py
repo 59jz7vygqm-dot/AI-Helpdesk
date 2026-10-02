@@ -98,6 +98,15 @@ class ChatterboxSynthesizer(Synthesizer):
                 sink.put(self._to_pcm16(model.generate(text, **kwargs)))
         except Exception as exc:  # pragma: no cover - depends on the model build
             log.exception("Chatterbox synthesis failed")
+            # The failure seen on a real call was inside the model's own
+            # alignment analyser, whose state lives on the model instance:
+            #   torch.stack(self.last_aligned_attns) -> got NoneType
+            # after a barge-in cut a generation short. A model in that state
+            # fails every following sentence too, so it is discarded and the
+            # next call reloads it. That costs the better part of a minute once,
+            # against a voice that is broken until someone restarts the
+            # container.
+            self._model = None
             sink.put(exc)
         finally:
             sink.put(None)

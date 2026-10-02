@@ -391,6 +391,7 @@ class CallSession:
         self.barge_in.reset()
         streamer = SentenceStreamer(**self._streamer_kwargs)
         first_audio_logged = False
+        produced_audio = False
         turn_started = time.monotonic()
         self._reset_speech_plan()
         self._interrupted_remainder = ""
@@ -404,7 +405,7 @@ class CallSession:
         metrics.retrieval_ms = int((time.monotonic() - retrieval_started) * 1000)
 
         async def synthesize(chunk: str) -> None:
-            nonlocal first_audio_logged
+            nonlocal first_audio_logged, produced_audio
             async for piece in self.synthesizer.stream(chunk, cancel=self._cancel_speech):
                 if self._cancel_speech.is_set():
                     return
@@ -415,6 +416,7 @@ class CallSession:
                     if metrics.speech_end_at:
                         metrics.response_ms = int((time.monotonic() - metrics.speech_end_at) * 1000)
                     first_audio_logged = True
+                produced_audio = True
                 await self._play(audio)
             # Record where this sentence ends in the outgoing stream.
             self._speech_plan.append((chunk, self._queued_samples))
@@ -438,6 +440,27 @@ class CallSession:
             return
 
         reply = self.agent.last_reply
+
+        # A backend that fails mid-sentence logs it and yields nothing, so the
+        # turn finishes having said not one word and the caller sits in silence
+        # until they hang up. That happened on a real call: chatterbox raised
+        # inside its own alignment analyser, the model's answer existed, and
+        # twenty-one seconds of nothing went down the line. Silence is the worst
+        # thing this agent can do, so a voice that produced no audio for an
+        # answer that exists is treated as the infrastructure failure it is.
+        if reply.text and not produced_audio and not self._cancel_speech.is_set():
+            log.error(
+                "the voice produced no audio for a %d-character answer -- "
+                "handing over rather than leaving the line silent",
+                len(reply.text),
+            )
+            if self.transfer_number:
+                await self._do_transfer()
+            else:
+                await self._speak_cached(self.texts.transfer_failed)
+                await self._do_hangup("tts-failed")
+            return
+
         if reply.repeat_count >= 2 and self.transfer_number:
             # Three near-identical answers means the agent is stuck, whatever it
             # thinks it is doing. Hand over rather than loop.

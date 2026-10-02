@@ -130,9 +130,26 @@ kann sie dann auf die Weiterleitungsnummer schicken.
 
 ### Bessere Stimme — der zweite Schritt
 
-**Stufe 1: Chatterbox** (natürlich, klonbar, MIT-Lizenz, GPU ~3 GB). Für eine
-natürliche Stimme am Telefon ist das die realistische Wahl — Qwen ist dafür zu
-langsam, siehe Stufe 2. Image neu bauen und umstellen:
+**Stufe 1: Chatterbox** (natürlich, klonbar, MIT-Lizenz, GPU ~3 GB).
+**Auf einer geteilten L4 gemessen zu langsam:**
+
+```
+voice speed: rtf 1.41 -- 4.7s to synthesise 3.3s of speech
+turn 1: ... tts 6661 ms ... reply 31 chars
+```
+
+6,6 Sekunden für 31 Zeichen im echten Anruf. Mit `vad.live_asr: false` fiel
+der Faktor nur von 1,53 auf 1,41 — die laufende Erkennung war also nicht die
+Ursache, die Karte ist es. Dazu stürzte Chatterbox nach einem Barge-in in
+seinem eigenen Alignment-Analyzer ab
+(`torch.stack(self.last_aligned_attns)` → `NoneType`) und lieferte danach
+nichts mehr.
+
+Auf einer **freien** Karte kann das anders aussehen; gemessen ist es hier mit
+Ollama und Whisper daneben. Die Logzeile `voice speed:` sagt es dir in der
+ersten Sekunde.
+
+Image neu bauen und umstellen:
 
 ```bash
 echo "TTS_PROFILE=quality" >> .env     # sudo löscht sonst die Variable
@@ -754,6 +771,31 @@ Was man am ehesten anfasst:
 | `knowledge.min_score` | zu niedrig → erfindet; zu hoch → leitet zu oft weiter |
 | `asr.initial_prompt` | eigene Produktnamen/Fehlercodes der Erkennung beibringen |
 | `sip.trace` | jede SIP-Nachricht loggen — das Erste bei Registrierungsproblemen |
+
+---
+
+## Welche Stimme auf welcher Hardware — gemessen
+
+Alle Zahlen auf einer Tesla L4 (23 GB), geteilt mit Ollama und
+faster-whisper. `voice speed: rtf` wird nach dem Warmlaufen an einem normalen
+Satz gemessen, also ohne Kernel-Kompilierung.
+
+| Backend | rtf | brauchbar | Anmerkung |
+|---|---|---|---|
+| **piper** | ≪ 0,1 | **ja** | CPU, robotisch, 974 ms Median im Gespräch |
+| chatterbox | **1,41** | nein | GPU ~3 GB, stürzte nach Barge-in ab |
+| qwen3 | **13,58** | nein | GPU ~3,4 GB, keine deutschen Sprecher |
+| Voxtral | — | nicht startbar | braucht eine CPU mit AVX |
+
+**Über 1,0 wartet der Anrufer jeden Satz ab**, und daran ändert keine
+Einstellung etwas. Auf dieser Karte, mit drei Modellen darauf, hält kein
+neuronales GPU-TTS mit — das ist eine Eigenschaft der Hardware, nicht dieses
+Projekts. Für eine natürliche Stimme im Produktivbetrieb gehört die Stimme auf
+eine eigene Karte.
+
+Bis dahin ist **piper** die Wahl, die funktioniert: ein Helpdesk, der in einer
+Sekunde eine richtige Antwort gibt, ist mehr wert als einer, der nach sieben
+Sekunden schön klingt.
 
 ---
 
