@@ -153,6 +153,33 @@ if command -v docker >/dev/null 2>&1; then
       ok "containers can use GPU $GPU_ID: $(head -1 "$LOGDIR/gpu.log")"
       ;;
   esac
+
+  # ./config and ./knowledge are bind-mounted, so a `git pull` changes those
+  # live -- but src/ is COPYd into the image. That asymmetry is a trap: the
+  # knowledge base updates, the code does not, and the container quietly runs
+  # last week's logic. Compare the image against the newest source file.
+  if [ -n "$DOCKER" ]; then
+    IMAGE_ISO=$($DOCKER image inspect ai-helpdesk:latest --format '{{.Created}}' 2>/dev/null || true)
+    if [ -z "$IMAGE_ISO" ]; then
+      warn "no ai-helpdesk:latest image yet"
+      hint "$DOCKER compose up -d --build"
+    else
+      image_epoch=$(date -d "$IMAGE_ISO" +%s 2>/dev/null || echo 0)
+      # Prune __pycache__: running the tests rewrites it, which would read as a
+      # source change every time and make the check cry wolf.
+      src_epoch=$(find src Dockerfile requirements*.txt \
+                    -name __pycache__ -prune -o -type f -printf '%T@\n' 2>/dev/null \
+                  | sort -rn | head -1 | cut -d. -f1)
+      src_epoch="${src_epoch:-0}"
+      if [ "$image_epoch" -gt 0 ] && [ "$src_epoch" -gt "$image_epoch" ]; then
+        bad "the image is older than src/ -- the container runs outdated code"
+        hint "image built $(date -d "@$image_epoch" '+%F %H:%M'), source changed $(date -d "@$src_epoch" '+%F %H:%M')"
+        hint "$DOCKER compose up -d --build"
+      else
+        ok "image is newer than src/ (built $(date -d "@$image_epoch" '+%F %H:%M'))"
+      fi
+    fi
+  fi
 else
   bad "docker not found"
 fi

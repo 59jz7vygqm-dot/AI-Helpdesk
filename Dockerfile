@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
         libsndfile1 \
         espeak-ng \
+        sox libsox-fmt-all \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
