@@ -124,6 +124,13 @@ class CallSession:
         self._speculative_result = None
 
         vad = build_vad(vad_config.get("backend", "auto"), int(vad_config.get("aggressiveness", 2)))
+        barge_in_ms = int(vad_config.get("barge_in_ms", 260))
+        # The pre-roll has to outlast the barge-in decision, otherwise the
+        # frames that proved the caller was talking have already scrolled out of
+        # it by the time the turn starts. The margin covers the detector's own
+        # hesitation: a non-voiced frame decrements its run, so confirming an
+        # interruption takes longer than barge_in_ms of wall clock.
+        pre_roll_ms = max(int(vad_config.get("pre_roll_ms", 300)), barge_in_ms + 240)
         self.endpointer = Endpointer(
             EndpointerConfig(
                 frame_ms=20,
@@ -132,14 +139,14 @@ class CallSession:
                 end_silence_ms=int(vad_config.get("end_silence_ms", 420)),
                 speculative_silence_ms=int(vad_config.get("speculative_silence_ms", 220)),
                 max_utterance_ms=int(vad_config.get("max_utterance_ms", 20000)),
-                pre_roll_ms=int(vad_config.get("pre_roll_ms", 300)),
-                barge_in_ms=int(vad_config.get("barge_in_ms", 260)),
+                pre_roll_ms=pre_roll_ms,
+                barge_in_ms=barge_in_ms,
             ),
             vad,
         )
         self.barge_in = BargeInDetector(
             build_vad(vad_config.get("backend", "auto"), 3),
-            min_speech_ms=int(vad_config.get("barge_in_ms", 260)),
+            min_speech_ms=barge_in_ms,
             frame_ms=20,
             echo_guard=bool(vad_config.get("echo_guard", True)),
             echo_attenuation_db=float(vad_config.get("echo_attenuation_db", 12.0)),
@@ -148,6 +155,9 @@ class CallSession:
         self.resume_on_backchannel = bool(vad_config.get("resume_on_backchannel", True))
         self.farewell_ends_call = bool(dialog.get("farewell_ends_call", True))
         self.farewell_min_ms = int(dialog.get("farewell_min_ms", 600))
+        # Below this an utterance is not worth a reply of any kind, not even an
+        # apology. Tied to the recogniser's own floor so the two cannot disagree.
+        self.min_turn_ms = int(config.get("asr", {}).get("min_utterance_ms", 350))
         self.filler_after_ms = int(dialog.get("filler_after_ms", 700))
         self._last_filler = ""
         self._filler_task: Optional[asyncio.Task] = None
@@ -664,6 +674,9 @@ class CallSession:
         # phrase such as the greeting is still playing, the only question is
         # whether the caller has started talking over us.
         if self._turn_in_flight or self._bot_audio_playing():
+            # Feed the pre-roll even now, so the speech that *earned* the
+            # barge-in is part of the utterance rather than thrown away.
+            self.endpointer.observe(frame)
             if self.barge_in.push(frame, TELEPHONY_RATE):
                 log.info("barge-in on %s", self.call.call_id)
                 self._cancel_turn()
@@ -724,13 +737,36 @@ class CallSession:
         metrics.barge_in = self._barge_in_flag
         self._barge_in_flag = False
 
+        # Decided before recognising, so no backend has to be trusted to have
+        # its own floor: too little audio was never a sentence -- a cough, a
+        # door, the tail of an interruption. Replying to one is actively
+        # harmful, because the agent then talks over a caller who is still
+        # speaking, whose next words barge in on another fragment. That loop is
+        # what "it does not listen at all" sounds like from the other end.
+        pending = self.endpointer.utterance_ms()
+        if pending < self.min_turn_ms and self._speculative_result is None:
+            metrics.utterance_ms = pending
+            log.info(
+                "ignoring %d ms of audio: too short to be an utterance (under %d ms)",
+                pending,
+                self.min_turn_ms,
+            )
+            self._drop_speculative()
+            self.endpointer.reset()
+            self.metrics.add(metrics)
+            return
+
         transcript = await self._finish_recognition(metrics)
         self.endpointer.reset()
 
         if transcript is None or transcript.is_empty:
             self.agent.misunderstood += 1
+            self.metrics.add(metrics)
             log.info(
-                "nothing recognised (attempt %d/%d)", self.agent.misunderstood, self.max_misunderstood
+                "nothing recognised in %d ms of audio (attempt %d/%d)",
+                metrics.utterance_ms,
+                self.agent.misunderstood,
+                self.max_misunderstood,
             )
             if self.agent.misunderstood > self.max_misunderstood and self.transfer_number:
                 await self._do_transfer()

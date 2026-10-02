@@ -81,8 +81,11 @@ tts:
   #              THE default: in every image, never stalls, no GPU.
   # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages.
   #              Needs an image built with TTS_PROFILE=quality.
-  # qwen3      - Qwen3-TTS. Best German voice, GPU. Needs an image built with
-  #              TTS_PROFILE=qwen -- without it the backend fails to import.
+  # qwen3      - Qwen3-TTS, GPU. NOT usable for a live call on an L4: measured
+  #              rtf 13.6 on the first sentence and 1-2 warm, so the caller
+  #              waits through every sentence. Its built-in speakers are not
+  #              German either, so German comes out accented. Needs an image
+  #              built with TTS_PROFILE=qwen. Fine for offline rendering.
   #              Careful: TTS_BACKEND in .env overrides this line.
   # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
   backend: piper

@@ -161,6 +161,22 @@ class Endpointer:
         self.speech_frames = 0
         self._buffer.clear()
 
+    def observe(self, frame: np.ndarray) -> None:
+        """Keep the pre-roll fed without deciding anything.
+
+        Used while the agent is speaking, when the barge-in detector owns the
+        decision.  The detector needs a fifth of a second of speech to be sure,
+        and without this that fifth of a second was simply lost: the utterance
+        began only after the interruption had been confirmed, so a caller who
+        cut in with a short question was left with a fragment too small to
+        recognise.  Here the frames are kept, and reset() deliberately does not
+        drop them, so the utterance starts where the caller did.
+        """
+        max_pre = self._ms_to_frames(self.config.pre_roll_ms)
+        self._pre_roll.append(frame)
+        if len(self._pre_roll) > max_pre:
+            del self._pre_roll[: len(self._pre_roll) - max_pre]
+
     def push(self, frame: np.ndarray) -> VadEvent:
         cfg = self.config
         voiced = bool(self.vad.is_speech(frame, cfg.sample_rate))
