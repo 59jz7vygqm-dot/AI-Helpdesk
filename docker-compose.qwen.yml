@@ -1,0 +1,77 @@
+# Qwen3-TTS as a separate service.
+#
+# It needs Python 3.13, which the agent image (CUDA base, 3.10) cannot provide, so
+# it runs in its own container and the agent reaches it over HTTP through the
+# openai TTS backend.
+#
+#   sudo docker compose -f docker-compose.yml -f docker-compose.qwen.yml up -d --build
+#
+# First start downloads roughly 5 GB from Hugging Face into the shared /models
+# volume, so give it time and watch:  docker compose logs -f qwen-tts
+
+services:
+  qwen-tts:
+    build: ./tts-server
+    image: qwen-tts:latest
+    container_name: qwen-tts
+    restart: on-failure:5
+
+    # Same host networking as the agent, so 127.0.0.1:8880 reaches it.
+    network_mode: host
+
+    environment:
+      # 1.7B sounds clearly better; 0.6B needs about half the VRAM.
+      QWEN_MODEL_ID: "${QWEN_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+      QWEN_DEVICE: "cuda:0"
+      QWEN_DTYPE: "bfloat16"
+      # The accepted spelling differs between builds; startup tries alternatives
+      # and logs which one worked.
+      QWEN_LANGUAGE: "${QWEN_LANGUAGE:-German}"
+      # custom = built-in speaker | clone = your own voice | design = describe it
+      QWEN_MODE: "${QWEN_MODE:-custom}"
+      QWEN_SPEAKER: "${QWEN_SPEAKER:-}"
+      QWEN_INSTRUCT: "${QWEN_INSTRUCT:-}"
+      QWEN_REF_AUDIO: "${QWEN_REF_AUDIO:-}"
+      QWEN_REF_TEXT: "${QWEN_REF_TEXT:-}"
+      QWEN_PORT: "8880"
+      # Only this GPU, so it cannot land on a card another workload fills.
+      NVIDIA_VISIBLE_DEVICES: "${GPU_ID:-0}"
+
+    volumes:
+      - helpdesk-models:/models
+      - ./voices:/voices:ro          # reference audio for mode=clone
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_ID:-0}"]
+              capabilities: [gpu]
+
+    shm_size: "2gb"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  helpdesk:
+    # Wait for the voice service: the first call would otherwise arrive while the
+    # model is still loading.
+    depends_on:
+      qwen-tts:
+        condition: service_healthy
+    environment:
+      # Pin the backend here rather than relying on .env or config.yaml. Starting
+      # this overlay means using this voice, and TTS_BACKEND=piper left over in
+      # .env would otherwise silently win -- the container would run and you would
+      # still hear piper.
+      HELPDESK_TTS_BACKEND: "openai"
+      HELPDESK_TTS_OPENAI_BASE_URL: "http://127.0.0.1:8880/v1"
+      HELPDESK_TTS_OPENAI_RESPONSE_FORMAT: "pcm"
+      HELPDESK_TTS_OPENAI_SAMPLE_RATE: "24000"
+      HELPDESK_TTS_OPENAI_MODEL: "${QWEN_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+
+volumes:
+  helpdesk-models:

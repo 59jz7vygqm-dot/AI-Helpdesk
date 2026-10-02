@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
 failed=0
 
-for test in tests/test_sip_flow.py tests/test_session.py tests/test_wiring.py tests/test_units.py; do
+for test in tests/test_sip_flow.py tests/test_session.py tests/test_wiring.py tests/test_units.py tests/test_openai_tts.py; do
   [[ -f "$test" ]] || continue
   echo "=============================================================="
   echo "  $test"

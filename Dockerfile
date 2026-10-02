@@ -5,7 +5,9 @@ ARG CUDA_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 FROM ${CUDA_IMAGE}
 
 # lite    = Piper only (CPU). Small image, builds in minutes, always works.
-# quality = adds Chatterbox and GPU synthesis (~5 GB more image, pulls torch).
+# qwen    = adds Qwen3-TTS: the best German voice (~6 GB more image, pulls torch).
+# quality = adds Chatterbox and GPU piper instead. Mutually exclusive with qwen,
+#           because the two pin incompatible transformers versions.
 ARG TTS_PROFILE=lite
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -31,12 +33,23 @@ RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install -r /app/requirements.txt
 
 # The voice stack is a separate layer for the same reason: it is the big one.
-COPY requirements-quality.txt /app/requirements-quality.txt
-RUN if [ "$TTS_PROFILE" = "quality" ]; then \
-      python3 -m pip install -r /app/requirements-quality.txt ; \
-    else \
-      echo "TTS_PROFILE=$TTS_PROFILE -- skipping the GPU voice stack" ; \
-    fi
+# torch is installed from the CUDA index first so the wheel matches the base, then
+# the chosen voice package on top of it.
+COPY requirements-quality.txt requirements-qwen.txt /app/
+RUN set -e; \
+    case "$TTS_PROFILE" in \
+      qwen) \
+        python3 -m pip install torch torchaudio \
+          --index-url https://download.pytorch.org/whl/cu128 ; \
+        python3 -m pip install -r /app/requirements-qwen.txt ; \
+        ;; \
+      quality) \
+        python3 -m pip install -r /app/requirements-quality.txt ; \
+        ;; \
+      *) \
+        echo "TTS_PROFILE=$TTS_PROFILE -- piper only, skipping the GPU voice stack" ; \
+        ;; \
+    esac
 
 COPY src /app/src
 COPY config /app/config

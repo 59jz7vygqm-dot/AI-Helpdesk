@@ -55,7 +55,11 @@ def build_synthesizer(config: dict) -> Synthesizer:
             reference_text=q.get("reference_text", "") or "",
             attn_implementation=q.get("attn_implementation", "") or "",
             sample_rate=int(q.get("sample_rate", 24000)),
-            streaming=bool(q.get("streaming", True)),
+            temperature=float(q.get("temperature", 0.8)),
+            top_k=int(q.get("top_k", 50)),
+            top_p=float(q.get("top_p", 0.95)),
+            repetition_penalty=float(q.get("repetition_penalty", 1.05)),
+            max_new_tokens=int(q.get("max_new_tokens", 0)),
         )
 
     if backend == "chatterbox":

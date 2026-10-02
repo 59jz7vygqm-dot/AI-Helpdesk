@@ -1,3 +1,27 @@
+# Profile: Qwen3-TTS - the best German voice available locally.
+#
+# Build the image with the qwen profile first, which installs the `qwen-tts`
+# package and torch (about 6 GB more image, ~15 minutes):
+#
+#   TTS_PROFILE=qwen sudo docker compose build
+#   sudo docker compose up -d
+#
+# No second container: the package needs only Python 3.9, so it runs inside the
+# agent image. It cannot be combined with chatterbox, which pins an incompatible
+# transformers version -- pick one.
+#
+#   Ollama  qwen2.5:7b-instruct Q4    ~5.2 GB   on the HOST, pin it to the same GPU
+#   ASR     large-v3-turbo int8       ~1.6 GB
+#   TTS     Qwen3-TTS 1.7B bfloat16   ~8.0 GB
+#   KB      fastembed (CPU)                0
+#   ------------------------------------------
+#                                    ~14.8 GB of a 23 GB L4
+#
+# Expect 300-700 ms to first audio against piper's ~60 ms. The log reports the
+# realtime factor; piper stays available via tts.backend if it is too slow.
+#
+# Copy over config/config.yaml to use it.
+
 # AI Helpdesk configuration.
 #
 # Every scalar here can be overridden from the environment as
@@ -82,24 +106,33 @@ tts:
   #              Run it in its own container and use the openai backend instead;
   #              see the README section "Bessere Stimme".
   # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
-  backend: piper
+  backend: qwen3
 
   qwen3:
     # 1.7B sounds clearly better than 0.6B; drop to 0.6B only if VRAM is tight.
     model_id: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
     device: cuda:0
     dtype: bfloat16
-    language: German             # the model wants a language name, not a code
+    # Validated against the model's own list at startup; a wrong value is
+    # corrected automatically and logged.
+    language: German
     # custom = a built-in speaker | clone = your own voice | design = describe it
     mode: custom
-    speaker: ""                  # see scripts/list_qwen_voices.py
+    # Empty picks the first supported speaker and logs the full list, so the
+    # first start tells you what to choose from.
+    speaker: ""
     instruct: ""                 # e.g. "ruhig, freundlich, sachlich"
-    # mode: clone -- 3-20 s of clean speech plus its exact transcript
+    # mode: clone -- a few seconds of clean speech plus its exact transcript
     reference_audio: ""
     reference_text: ""
     attn_implementation: ""      # "flash_attention_2" if installed
     sample_rate: 24000
-    streaming: true              # used when the installed build exposes it
+    # Sampling. Lower temperature is steadier, higher more expressive.
+    temperature: 0.8
+    top_k: 50
+    top_p: 0.95
+    repetition_penalty: 1.05
+    max_new_tokens: 0            # 0 = model default
 
   piper:
     # medium, not high: the call is 8 kHz, so "high" spends several times the
@@ -157,8 +190,8 @@ knowledge:
   # passage gets passed in as context, which invites invented instructions.
   min_score: 0.40
   embeddings:
-    backend: ollama                 # or: fastembed (CPU, no VRAM)
-    model: bge-m3                   # multilingual, strong on German
+    backend: fastembed              # CPU: no VRAM, no extra Ollama model to pull
+    model: jinaai/jina-embeddings-v2-base-de
     batch_size: 16
     query_prefix: ""                # for e5 models use "query: "
     document_prefix: ""             # for e5 models use "passage: "

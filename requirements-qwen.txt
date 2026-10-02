@@ -1,0 +1,17 @@
+# Qwen3-TTS: the best German voice available locally. Installed when the image is
+# built with TTS_PROFILE=qwen.
+#
+# The package is `qwen-tts` (Alibaba Qwen team, Apache-2.0). Do NOT use
+# `qwen3-tts` from PyPI: that is an unrelated third-party CLI for Apple Silicon
+# which depends on mlx and cannot run on NVIDIA at all.
+#
+# It needs Python >= 3.9, so it fits the agent image directly -- no separate
+# container. It pins transformers==4.57.3, which is why it cannot be combined with
+# chatterbox (which pins transformers==5.2.0): pick one profile or the other.
+#
+# torch comes from the CUDA 12.8 index in the Dockerfile so the wheel matches.
+
+qwen-tts>=0.1.1
+
+# CPU embeddings, so the knowledge base costs no VRAM
+fastembed>=0.4
