@@ -279,6 +279,11 @@ def apply_env_overrides(config: Dict[str, Any], prefix: str = "HELPDESK_") -> Di
     for env_key, raw in os.environ.items():
         if not env_key.startswith(prefix):
             continue
+        if raw == "":
+            # An unset variable in docker-compose expands to "", and an override
+            # that is present but empty must not beat config.yaml -- that is how
+            # `HELPDESK_TTS_BACKEND: "${TTS_BACKEND:-}"` lets the file decide.
+            continue
         remainder = env_key[len(prefix) :].lower()
         for section in sorted(result.keys(), key=len, reverse=True):
             if not remainder.startswith(section + "_"):

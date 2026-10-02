@@ -27,6 +27,9 @@ log = logging.getLogger(__name__)
 _WORD = re.compile(r"[\wäöüßÄÖÜ]+(?:[-/.][\wäöüßÄÖÜ]+)*", re.UNICODE)
 _SPLIT_INNER = re.compile(r"[-/.]")
 
+#: markdown editing notes, stripped before chunking
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
 #: German function words carry no retrieval signal
 _STOPWORDS = {
     "der", "die", "das", "und", "oder", "ist", "sind", "ein", "eine", "einen",
@@ -86,6 +89,10 @@ def split_markdown(text: str, source: str, *, max_chars: int = 900, overlap_char
     Heading-aware splitting keeps a FAQ answer together with its question, which
     is what makes short retrieved passages usable as an answer.
     """
+    # Editing notes for whoever maintains the corpus must not become retrievable
+    # text: an HTML comment explaining how to fill a section would otherwise be
+    # embedded, matched, and read out as the answer.
+    text = _HTML_COMMENT.sub("", text)
     lines = text.splitlines()
     sections: List[Tuple[str, List[str]]] = []
     heading = ""
@@ -198,6 +205,21 @@ class KnowledgeBase:
                 )
         return chunks
 
+    def _warn_about_placeholders(self, chunks: Sequence[Chunk]) -> None:
+        """Say so when the corpus still carries template text.
+
+        Anything in here gets read out to a caller as fact, so an unreplaced
+        placeholder is worse than a missing section: without the section the
+        agent hands over, with it the agent lies confidently.
+        """
+        marked = sorted({c.source for c in chunks if "PLATZHALTER" in c.text})
+        if marked:
+            log.warning(
+                "knowledge base still contains PLATZHALTER in %s -- the agent "
+                "will read that out to callers. Replace or delete those sections.",
+                ", ".join(marked),
+            )
+
     def _fingerprint(self, chunks: Sequence[Chunk]) -> str:
         digest = hashlib.sha256()
         digest.update(getattr(self.embedder, "identity", "unknown").encode())
@@ -215,6 +237,7 @@ class KnowledgeBase:
             self._build_lexical()
             return
 
+        self._warn_about_placeholders(chunks)
         fingerprint = self._fingerprint(chunks)
         if not force and self.cache_path and os.path.exists(self.cache_path):
             cached = self._load_cache(fingerprint)

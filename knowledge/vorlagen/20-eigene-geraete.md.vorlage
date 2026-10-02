@@ -1,0 +1,26 @@
+# Unsere Geräte und Fehlercodes
+
+<!--
+  VORLAGE, wird nicht geladen. Siehe 00-unternehmen.md.vorlage.
+
+  Hier gehört hin, was nur bei euch gilt: Druckermodelle, Fehlercodes,
+  Portalnamen, der VPN-Client, wo Ersatzmaterial liegt. Genau dieser Teil
+  entscheidet, ob der Agent nützlich ist oder nur allgemein klingt.
+
+  Ein Abschnitt pro Code oder Gerät, mit dem Code in der Überschrift -- die
+  Suche indexiert "E-512" und "512" getrennt, der Anrufer wird also gefunden,
+  egal wie er den Code ausspricht.
+-->
+
+## Welche Drucker benutzen wir
+PLATZHALTER: Modellbezeichnungen, so wie sie am Gerät stehen.
+
+## Was bedeutet Fehlercode PLATZHALTER am Drucker
+PLATZHALTER: Was der Code heißt und was der Anrufer tun soll.
+
+## Wie setze ich mein Passwort zurück
+PLATZHALTER: Der echte Weg. Portalname oder -adresse, was gebraucht wird,
+und was passiert, wenn das nicht geht.
+
+## Welchen VPN-Client benutzen wir
+PLATZHALTER: Name des Clients und womit man sich anmeldet.

@@ -235,6 +235,12 @@ fi
 if [ -f config/config.yaml ]; then
   TTS_CONF=$(yaml_get config/config.yaml tts backend)
   ok "config/config.yaml present (voice: ${TTS_BACKEND:-${TTS_CONF:-?}})"
+  # TTS_BACKEND reaches the container as an env override and beats config.yaml.
+  # Silently, which cost an afternoon once: the file said qwen3 and piper spoke.
+  if [ -n "${TTS_BACKEND:-}" ] && [ -n "$TTS_CONF" ] && [ "${TTS_BACKEND:-}" != "$TTS_CONF" ]; then
+    warn "TTS_BACKEND=${TTS_BACKEND:-} in .env overrides tts.backend=$TTS_CONF in config.yaml"
+    hint "remove TTS_BACKEND from .env to let config.yaml decide"
+  fi
   case "${TTS_BACKEND:-$TTS_CONF}" in
     piper)
       # Piper needs the voice file on disk; ./voices is mounted to /models/piper.
@@ -250,12 +256,22 @@ if [ -f config/config.yaml ]; then
       fi
       ;;
     chatterbox)
-      warn "chatterbox needs an image built with TTS_PROFILE=quality"
-      hint "TTS_PROFILE=quality docker compose build"
+      if [ "${TTS_PROFILE:-lite}" = "quality" ]; then
+        ok "TTS_PROFILE=quality, so chatterbox is in the image"
+      else
+        warn "chatterbox needs an image built with TTS_PROFILE=quality (now: ${TTS_PROFILE:-lite})"
+        hint "echo TTS_PROFILE=quality >> .env && docker compose build"
+      fi
       ;;
     qwen3)
-      warn "qwen3-tts is not in the image (its PyPI package needs Python 3.13)"
-      hint "see the README section 'Bessere Stimme', or use piper/chatterbox"
+      # The build arg is read from .env, and `sudo VAR=x docker compose` does not
+      # pass it: sudo drops the environment, so the image silently gets `lite`.
+      if [ "${TTS_PROFILE:-lite}" = "qwen" ]; then
+        ok "TTS_PROFILE=qwen, so Qwen3-TTS is in the image"
+      else
+        bad "qwen3 needs an image built with TTS_PROFILE=qwen (now: ${TTS_PROFILE:-lite})"
+        hint "echo TTS_PROFILE=qwen >> .env && sudo docker compose build"
+      fi
       ;;
   esac
 else

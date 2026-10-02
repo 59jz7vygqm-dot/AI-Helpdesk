@@ -190,7 +190,7 @@ tts:
   qwen3:
     mode: clone
     reference_audio: /models/piper/meine-stimme.wav
-    reference_text: "Guten Tag, Sie sprechen mit dem Service der Beispiel GmbH."
+    reference_text: "Guten Tag, Sie sprechen mit dem telefonischen Service."
 ```
 
 Oder die Stimme beschreiben: `mode: design` plus
@@ -295,10 +295,27 @@ angelegt wie für ein Tischtelefon.
 
 ### 4. Wissensdatenbank füllen
 
-Markdown-Dateien in `knowledge/`. Die Beispiele dort löschen und eigene Inhalte
-rein — `knowledge/README.md` erklärt, wie man schreibt, damit der Agent die
-richtige Stelle findet. Der Index baut sich beim Start automatisch neu, sobald
-sich der Text ändert.
+`knowledge/10-it-faq.md` enthält allgemeine Schritte, die überall gelten
+(Drucker, Bildschirm, VPN, Outlook) — die kann bleiben. Alles, was nur bei euch
+gilt, kommt aus den Vorlagen:
+
+```bash
+cp knowledge/vorlagen/00-unternehmen.md.vorlage knowledge/00-unternehmen.md
+cp knowledge/vorlagen/20-eigene-geraete.md.vorlage knowledge/20-eigene-geraete.md
+```
+
+Platzhalter ersetzen: Firmenname, Erreichbarkeit, Druckermodelle, Fehlercodes,
+Portalname, VPN-Client. Solange noch Vorlagentext drinsteht, warnt der Start mit
+`knowledge base still contains PLATZHALTER in ...`. **Lieber einen Abschnitt
+löschen als raten** — ohne Treffer leitet der Agent weiter, mit einer falschen
+Angabe liest er sie überzeugt vor.
+
+Dazu den Firmennamen in `config.yaml` setzen (`dialog.company` und
+`dialog.greeting`); standardmäßig steht dort neutral „unserem Unternehmen".
+
+`knowledge/README.md` erklärt, wie man Abschnitte schreibt, damit die Suche sie
+findet. Der Index baut sich beim Start automatisch neu, sobald sich der Text
+ändert.
 
 ### 5. Starten
 
@@ -474,8 +491,9 @@ Die Reihenfolge, in der es sich lohnt zu suchen — aus einem echten ersten Anru
 gelernt:
 
 **1. Steht in der Wissensdatenbank überhaupt eine Antwort?** Das ist mit Abstand
-der größte Hebel und wird meist zuletzt geprüft. Solange `knowledge/` die
-Beispieldateien enthält, kann der Agent auf echte Fragen nur daneben antworten.
+der größte Hebel und wird meist zuletzt geprüft. `knowledge/10-it-faq.md` deckt
+nur das Allgemeine ab; zu allem Firmenspezifischen findet der Agent nichts,
+solange die Vorlagen aus `knowledge/vorlagen/` nicht ausgefüllt sind.
 Die Logzeile `kb hits for '...'` zeigt, was er gefunden hat und wie gut es passt:
 
 ```

@@ -81,10 +81,9 @@ tts:
   #              THE default: in every image, never stalls, no GPU.
   # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages.
   #              Needs an image built with TTS_PROFILE=quality.
-  # qwen3      - Qwen3-TTS. Best quality, but the PyPI package needs Python 3.13
-  #              while the CUDA base images ship 3.10, so it is NOT in the image.
-  #              Run it in its own container and use the openai backend instead;
-  #              see the README section "Bessere Stimme".
+  # qwen3      - Qwen3-TTS. Best German voice, GPU. Needs an image built with
+  #              TTS_PROFILE=qwen -- without it the backend fails to import.
+  #              Careful: TTS_BACKEND in .env overrides this line.
   # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
   backend: piper
 
@@ -207,7 +206,10 @@ vad:
 
 dialog:
   # Without an article, so it reads correctly in every sentence the model builds.
-  company: "Beispiel GmbH"
+  # Der echte Firmenname, ohne Artikel, damit jeder Satz des Modells passt.
+  # Steht hier bewusst neutral: ein erfundener Name wird sonst am Telefon
+  # vorgelesen, als wäre er echt.
+  company: "unserem Unternehmen"
 
   # helpdesk  = answers only from the knowledge base, hands over otherwise
   # assistant = also chats freely (smalltalk, general questions); for demos
@@ -215,8 +217,7 @@ dialog:
   agent_name: "Alex"
 
   greeting: >-
-    Guten Tag, hier ist der Service der Beispiel GmbH.
-    Was kann ich für Sie tun?
+    Guten Tag, hier ist der Service. Was kann ich für Sie tun?
   transfer_announcement: "Einen Moment bitte, ich verbinde Sie mit einem Kollegen."
   transfer_failed: >-
     Ich kann Sie im Moment leider nicht verbinden.
