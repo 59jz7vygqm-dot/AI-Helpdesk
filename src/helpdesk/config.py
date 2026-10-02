@@ -193,6 +193,16 @@ DEFAULTS: Dict[str, Any] = {
         # turn, so this is the last structural piece of the response time.
         "semantic_endpointing": True,
         "semantic_min_words": 3,
+        # Recognise while the caller is still speaking, so the semantic
+        # endpoint has a hypothesis the moment they pause. Without it the
+        # endpoint cannot fire before speculative_silence_ms plus a whole
+        # recognition, which exceeds end_silence_ms -- it loses to the plain
+        # hangover and the hangover gets paid on nearly every turn.
+        "live_asr": True,
+        # New audio needed before the next pass. Each pass is a full encode on
+        # the same GPU as synthesis, so this trades GPU load against latency.
+        "live_interval_ms": 500,
+        "live_min_audio_ms": 600,
         "echo_guard": True,
         "echo_attenuation_db": 12.0,
         "echo_correlation": 0.72,

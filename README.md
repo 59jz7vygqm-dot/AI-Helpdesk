@@ -700,6 +700,62 @@ Was man am ehesten anfasst:
 
 ---
 
+## Laufende Erkennung — transkribieren, während gesprochen wird
+
+Vorher wurde die ganze Äußerung gepuffert und dann transkribiert. Es gab ein
+Zwischenstück (`speculative_asr` startet bei 140 ms Stille), aber das war **ein**
+Durchlauf, keine laufende Erkennung.
+
+Das Problem war nicht die ASR-Latenz an sich, sondern ein Wettlauf, den der
+semantische Endpoint nicht gewinnen konnte:
+
+| | |
+|---|---|
+| Frühester Zeitpunkt, an dem er feuern konnte | 140 ms (Startmarke) + ~300 ms (Erkennung) = **~440 ms** |
+| Wann der normale Hangover ohnehin greift | `end_silence_ms` = **320 ms** |
+
+Er kam also fast immer zu spät, und der Hangover wurde auf **jedem** Zug voll
+bezahlt. Mit einer laufenden Hypothese kann er beim **ersten stillen Frame**
+feuern, also bei 20–40 ms.
+
+Dazu wird der Puffer während des Sprechens alle `live_interval_ms` neu
+transkribiert. Festgeschrieben wird nur, worauf sich **zwei aufeinanderfolgende
+Durchläufe einigen** (LocalAgreement-2, nach
+[Macháček et al.](https://arxiv.org/abs/2307.14743)) — Whisper schreibt den
+eigenen Schluss um, sobald mehr Audio da ist, und setzt hinter alles einen
+Punkt, auch hinter einen halben Satz. Würde man dem letzten Stand glauben,
+schneidet man Anrufern mitten im Satz das Wort ab.
+
+```yaml
+vad:
+  live_asr: true
+  live_interval_ms: 500        # neues Audio, bevor der nächste Durchlauf startet
+  live_min_audio_ms: 600       # darunter kommt nur Rauschen heraus
+```
+
+**Was es kostet, ehrlich:** jeder Durchlauf ist ein voller Encode auf derselben
+GPU, die auch synthetisiert. `live_interval_ms` ist deshalb genauso ein
+GPU-Last-Regler wie ein Latenz-Regler. Es läuft immer nur **ein** Durchlauf
+gleichzeitig — mehrere würden die GPU hinter den Anrufer setzen statt vor ihn.
+
+**Ob es sich lohnt, steht in der Logzeile:**
+
+```
+turn 1: response 640 ms (asr 180*/5live, kb 12, llm_ttft 95, tts 210)
+        utterance 1480 ms, reply 62 chars, endpoint at 40 ms silence
+```
+
+`5live` sind die Durchläufe, `endpoint at 40 ms silence` heißt, der semantische
+Endpoint hat gefeuert statt des Hangovers. **Viele `live`-Durchläufe ohne
+`endpoint at …` sind Kosten ohne Nutzen** — dann `live_interval_ms` hoch oder
+`live_asr: false`.
+
+Bei sehr kurzen Äußerungen bringt es wenig: unter ~`live_min_audio_ms` läuft
+gar kein Durchlauf, und bei 1,5 Sekunden Sprache ist nur ein Durchlauf drin.
+Der Gewinn wächst mit der Länge der Äußerung.
+
+---
+
 ## Eigener Asterisk davor — wenn die PBX fremdverwaltet ist
 
 Der Agent registriert sich als normale Nebenstelle, damit er mit einer verwalteten

@@ -22,6 +22,12 @@ class TurnMetrics:
     speech_end_at: float = 0.0
     asr_ms: int = 0
     asr_speculative: bool = False
+    #: live recognition passes spent on this turn, and the silence at which the
+    #: semantic endpoint fired. Together they say whether running recognition
+    #: is earning its GPU time: passes without a low endpoint_ms is cost
+    #: without benefit.
+    live_passes: int = 0
+    endpoint_ms: int = 0
     retrieval_ms: int = 0
     llm_first_token_ms: int = 0
     llm_total_ms: int = 0
@@ -35,10 +41,12 @@ class TurnMetrics:
     def summary(self) -> str:
         return (
             f"turn {self.turn}: response {self.response_ms} ms "
-            f"(asr {self.asr_ms}{'*' if self.asr_speculative else ''}, "
+            f"(asr {self.asr_ms}{'*' if self.asr_speculative else ''}"
+            f"{f'/{self.live_passes}live' if self.live_passes else ''}, "
             f"kb {self.retrieval_ms}, llm_ttft {self.llm_first_token_ms}, "
             f"tts {self.tts_first_chunk_ms}) "
             f"utterance {self.utterance_ms} ms, reply {self.reply_chars} chars"
+            + (f", endpoint at {self.endpoint_ms} ms silence" if self.endpoint_ms else "")
         )
 
 

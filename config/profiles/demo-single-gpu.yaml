@@ -220,6 +220,19 @@ vad:
   semantic_endpointing: true
   semantic_min_words: 3
 
+  # Transkribieren, waehrend gesprochen wird. Der Nutzen ist nicht die
+  # ASR-Latenz an sich, sondern dass der semantische Endpoint beim ersten
+  # stillen Frame schon eine Hypothese hat -- ohne das kann er erst nach
+  # speculative_silence_ms plus einer ganzen Erkennung feuern, was laenger ist
+  # als end_silence_ms, und verliert gegen den normalen Hangover.
+  # Kosten: jeder Durchlauf ist ein voller Encode auf derselben GPU wie die
+  # Synthese. live_interval_ms ist also auch ein GPU-Last-Regler. Die Logzeile
+  # sagt, ob es sich lohnt: viele "live"-Durchlaeufe ohne "endpoint at ... ms"
+  # sind Kosten ohne Nutzen.
+  live_asr: true
+  live_interval_ms: 500
+  live_min_audio_ms: 600
+
   # Echo guard: stops the agent's own voice, echoed back by a speakerphone or
   # mobile, from being mistaken for the caller interrupting. Compares incoming
   # audio against what was just transmitted.

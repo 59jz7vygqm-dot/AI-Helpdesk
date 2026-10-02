@@ -216,7 +216,13 @@ def build_config(**dialog_overrides) -> dict:
     config = copy.deepcopy(DEFAULTS)
     config["vad"].update({"backend": "energy", "end_silence_ms": 100,
                           "speculative_silence_ms": 60, "pre_roll_ms": 60,
-                          "barge_in_ms": 100, "start_frames": 2})
+                          "barge_in_ms": 100, "start_frames": 2,
+                          # Off for the turn-taking scenarios: StubRecognizer
+                          # hands out one scripted line per call, and running
+                          # recognition would spend those lines mid-utterance.
+                          # It has its own tests, with a stub that answers from
+                          # the audio it is given instead of from a script.
+                          "live_asr": False})
     config["dialog"].update({
         "fillers": ["Einen Moment.", "Einen Augenblick bitte.", "Ich schaue kurz nach."],
         "filler_after_ms": 60,
@@ -810,6 +816,175 @@ async def test_tiny_fragment_is_ignored_silently():
     return True
 
 
+class GrowingRecognizer(Recognizer):
+    """Answers from the audio it is given, the way a real recogniser does.
+
+    Returns a prefix of one sentence in proportion to the audio length, and
+    rewrites its own tail once -- which is what Whisper actually does as more
+    audio arrives, and the reason LocalAgreement exists. A script-driven stub
+    cannot model running recognition at all: it would hand out the next turn's
+    line in the middle of this one.
+    """
+
+    FULL = "Mein Drucker druckt nicht mehr seit heute morgen."
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seen_ms: List[int] = []
+
+    async def transcribe(self, pcm, *, language=None) -> Transcript:
+        self.calls += 1
+        duration_ms = int(pcm.size * 1000 / 16000)
+        self.seen_ms.append(duration_ms)
+        await asyncio.sleep(0.01)
+        words = self.FULL.rstrip(".").split()
+        # One word per 120 ms of audio, so a longer buffer yields more text.
+        take = max(1, min(len(words), duration_ms // 120))
+        text = " ".join(words[:take])
+        # Whisper punctuates whatever it has, finished or not -- which is
+        # exactly why the agreed prefix, not the latest guess, decides.
+        return Transcript(text=text + ".", duration_ms=duration_ms,
+                          avg_logprob=-0.3, latency_ms=10)
+
+
+async def test_live_asr_has_a_hypothesis_before_the_pause():
+    """Running recognition must produce a hypothesis while speech continues.
+
+    Without it the semantic endpoint cannot fire until speculative_silence_ms
+    plus a whole recognition have elapsed, which is longer than end_silence_ms
+    -- so it loses to the plain hangover and the hangover is paid in full on
+    nearly every turn.
+    """
+    config = build_config()
+    config["vad"].update({"live_asr": True, "live_interval_ms": 60,
+                          "live_min_audio_ms": 60, "end_silence_ms": 2000,
+                          "speculative_silence_ms": 1500})
+    session, call, ua, synth, llm = await build_session(
+        [], ["Was zeigt das Display?"], config=config,
+    )
+    session.recognizer = GrowingRecognizer()
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+
+    # Speak continuously, with no pause at all.
+    for frame in speech(60):
+        session._on_audio(frame)
+        await asyncio.sleep(0.004)
+    await wait_until(lambda: session.recognizer.calls > 0, 3, "a live pass ran")
+    session._collect_live()
+
+    assert session._live_result is not None, "no hypothesis while still speaking"
+    assert session.recognizer.calls >= 2, (
+        f"only {session.recognizer.calls} pass(es): no running recognition")
+    print(f"PASS {session.recognizer.calls} live passes during speech, "
+          f"hypothesis: {session._live_result.text!r}")
+
+    agreed = session._committed_prefix()
+    assert agreed and agreed in GrowingRecognizer.FULL, f"bad agreed prefix: {agreed!r}"
+    # It must be a prefix of the latest guess, never a parallel reading. Once
+    # the recogniser stops revising, the two are equal -- that is the point,
+    # not a failure. The "shorter while still growing" case is covered by
+    # test_live_asr_waits_for_an_unfinished_sentence.
+    assert session._live_texts[-1].startswith(agreed), (
+        f"agreed prefix {agreed!r} is not a prefix of {session._live_texts[-1]!r}")
+    print(f"PASS LocalAgreement committed the agreed prefix: {agreed!r}")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_live_asr_does_not_queue_gpu_work():
+    """Only one recognition may be in flight, however much audio arrives.
+
+    Queued passes put the GPU behind the caller instead of ahead of them, and
+    they compete with synthesis on the same card.
+    """
+    config = build_config()
+    config["vad"].update({"live_asr": True, "live_interval_ms": 20,
+                          "live_min_audio_ms": 40, "end_silence_ms": 2000,
+                          "speculative_silence_ms": 1500})
+    session, call, ua, synth, llm = await build_session(
+        [], ["Antwort"], config=config,
+    )
+
+    slow = GrowingRecognizer()
+    started = {"n": 0, "peak": 0, "live": 0}
+    original = slow.transcribe
+
+    async def counting(pcm, *, language=None):
+        started["n"] += 1
+        started["live"] += 1
+        started["peak"] = max(started["peak"], started["live"])
+        try:
+            await asyncio.sleep(0.08)
+            return await original(pcm, language=language)
+        finally:
+            started["live"] -= 1
+
+    slow.transcribe = counting
+    session.recognizer = slow
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+
+    for frame in speech(80):
+        session._on_audio(frame)
+        await asyncio.sleep(0.002)
+        session._collect_live()
+    await asyncio.sleep(0.2)
+
+    assert started["peak"] <= 1, f"{started['peak']} recognitions ran at once"
+    print(f"PASS {started['n']} passes, never more than {started['peak']} at a time")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
+async def test_live_asr_waits_for_an_unfinished_sentence():
+    """A hypothesis that only looks finished must not end the turn.
+
+    Whisper puts a dot after whatever it has. Acting on the latest guess would
+    cut the caller off mid-sentence, so only the prefix two passes agree on is
+    allowed to decide.
+    """
+    config = build_config()
+    config["vad"].update({"live_asr": True, "live_interval_ms": 60,
+                          "live_min_audio_ms": 60})
+    session, call, ua, synth, llm = await build_session(
+        [], ["Antwort"], config=config,
+    )
+    session.recognizer = GrowingRecognizer()
+
+    # One hypothesis only: nothing to agree with, so nothing may be committed.
+    session._live_texts = ["Mein Drucker."]
+    assert session._committed_prefix() == "", "committed a prefix from one pass"
+    assert session._finished_hypothesis() == "", "ended the turn on a single guess"
+
+    # Two passes that disagree on the tail: only the shared part counts, and
+    # here it carries no sentence-final mark, so the turn stays open.
+    session._live_texts = ["Mein Drucker druckt.", "Mein Drucker druckt nicht mehr."]
+    assert session._committed_prefix() == "Mein Drucker", \
+        f"wrong agreed prefix: {session._committed_prefix()!r}"
+    assert session._finished_hypothesis() == "", \
+        "ended the turn although the agreed prefix is unfinished"
+    print("PASS an unfinished agreed prefix keeps the turn open")
+
+    # Two passes agreeing on a finished sentence: now it may end the turn.
+    done = "Mein Drucker druckt nicht mehr."
+    session._live_texts = [done, done]
+    session._live_result = Transcript(text=done, duration_ms=1800, avg_logprob=-0.3)
+    assert session._finished_hypothesis() == done, "did not accept a finished sentence"
+    print(f"PASS a finished agreed sentence ends the turn: {done!r}")
+
+    session._done.set()
+    return True
+
+
 async def test_echo_does_not_interrupt():
     """The agent's own voice echoing back must not cut it off."""
     session, call, ua, synth, llm = await build_session(
@@ -897,6 +1072,9 @@ async def main() -> int:
         ("dtmf 0", test_dtmf_zero_transfers),
         ("backchannel resumes", test_backchannel_resumes_instead_of_restarting),
         ("real interruption asks again", test_real_interruption_does_ask_again),
+        ("live asr before the pause", test_live_asr_has_a_hypothesis_before_the_pause),
+        ("live asr queues no gpu work", test_live_asr_does_not_queue_gpu_work),
+        ("live asr waits for a full sentence", test_live_asr_waits_for_an_unfinished_sentence),
         ("short barge-in not apologised at", test_short_bargein_is_not_apologised_at),
         ("tiny fragment ignored", test_tiny_fragment_is_ignored_silently),
         ("echo does not interrupt", test_echo_does_not_interrupt),
