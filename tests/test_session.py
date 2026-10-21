@@ -985,6 +985,44 @@ async def test_live_asr_waits_for_an_unfinished_sentence():
     return True
 
 
+async def test_a_broken_voice_does_not_make_a_silent_call():
+    """A voice that yields nothing must hand over, not leave the line open.
+
+    What a real call did: chatterbox raised inside its own alignment analyser
+    after a barge-in, logged it, and yielded no audio. The model's answer
+    existed, nothing was spoken, and the caller sat through twenty-one seconds
+    of silence before hanging up -- the worst thing this agent can do.
+    """
+    session, call, ua, synth, llm = await build_session(
+        ["Mein Drucker druckt nicht."], ["Was zeigt das Display?"],
+    )
+
+    # Fails the way a real backend does: logs, yields nothing, raises nothing.
+    async def mute(text, *, cancel=None):
+        synth.spoken.append(text)
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await wait_until(lambda: not call.rtp.is_playing(), 3, "greeting done")
+    session.synthesizer.stream = mute
+
+    await feed(session, speech(30) + silence(15), drain_first=False)
+    await wait_until(lambda: ua.transfers or ua.hangups, 6, "call did not end")
+
+    assert ua.transfers == ["200"], (
+        f"a voice that produced nothing left the call hanging: "
+        f"transfers={ua.transfers} hangups={ua.hangups}")
+    print("PASS a voice that yields no audio hands over instead of going silent")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
 async def test_echo_does_not_interrupt():
     """The agent's own voice echoing back must not cut it off."""
     session, call, ua, synth, llm = await build_session(
@@ -1077,6 +1115,7 @@ async def main() -> int:
         ("live asr waits for a full sentence", test_live_asr_waits_for_an_unfinished_sentence),
         ("short barge-in not apologised at", test_short_bargein_is_not_apologised_at),
         ("tiny fragment ignored", test_tiny_fragment_is_ignored_silently),
+        ("broken voice hands over", test_a_broken_voice_does_not_make_a_silent_call),
         ("echo does not interrupt", test_echo_does_not_interrupt),
         ("transfer method passthrough", test_transfer_method_passed_through),
         ("farewell ends call", test_farewell_ends_the_call),
