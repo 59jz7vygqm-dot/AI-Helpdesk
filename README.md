@@ -810,6 +810,61 @@ die Zeit bis zum ersten Token, und das hört man am Telefon. Erst wenn die
 Antworten *inhaltlich* zu schwach sind, lohnt der Tausch; dann `llm_ttft` im
 Log vergleichen statt raten.
 
+### Die Stimme klingt falsch — fast immer die fehlende Referenz
+
+Chatterbox nimmt ohne `reference_audio` seine **eingebaute** Stimme, und die
+ist keine deutsche. Deutsch klingt damit nach jemandem, der Deutsch liest,
+ohne es zu sprechen. Das ist der größte Hebel auf die Stimmqualität, und er
+kostet nichts:
+
+```bash
+# 10-20 s klare deutsche Aufnahme: eine Person, kein Hall, keine Musik
+cp meine-stimme.wav voices/
+```
+```yaml
+tts:
+  chatterbox:
+    reference_audio: /models/piper/meine-stimme.wav
+```
+
+Reicht das nicht, entscheide **nach Gehör statt nach Modellnamen**:
+
+```bash
+./scripts/download_models.sh        # holt 10 deutsche Piper-Stimmen
+sudo docker compose exec helpdesk python3 /app/scripts/compare_voices.py
+```
+
+Das schreibt pro Stimme eine WAV in Telefonqualität, mit der Zeit daneben.
+`de_DE-thorsten-high` ist die beste der Piper-Stimmen und bei einer freien
+Karte problemlos bezahlbar — die `medium` wurde damals nur gewählt, als die
+Latenz noch bei sechs Sekunden lag.
+
+### Direkt nach der Begrüßung „das habe ich nicht verstanden"
+
+Das war Leitungsrauschen, kein Erkennungsproblem:
+
+```
+recognised nothing in 600 ms of audio at -58.3 dBFS -- too quiet
+```
+
+Sprache am Telefon liegt bei **−35 bis −15 dBFS**. Rauschen bei −58 hat einen
+Zug eröffnet, Whisper lieferte nichts, und der Agent hat das als
+Missverständnis behandelt — also über einen Anrufer geredet, der noch nicht
+angefangen hatte.
+
+Ein adaptiver Rauschteppich allein fängt das nicht: er passt sich dem Rauschen
+an, und dann reißt eine etwas lautere Stelle desselben Rauschens die Schwelle.
+Deshalb jetzt eine **absolute** Untergrenze:
+
+```yaml
+vad:
+  min_speech_db: -50.0
+```
+
+Darunter ist nichts Sprache, egal was das VAD vom Spektrum hält. Und eine
+leere Erkennung aus zu leisem Audio zählt nicht mehr als Missverständnis — der
+Agent bleibt still, statt sich für Stille zu entschuldigen.
+
 ### Er leitet weiter, obwohl er die Antwort hat
 
 Das war der schwerwiegendste Fehler, und es war kein Modellproblem.

@@ -1023,6 +1023,44 @@ async def test_a_broken_voice_does_not_make_a_silent_call():
     return True
 
 
+async def test_line_noise_after_the_greeting_says_nothing():
+    """Noise must not become a turn, and silence must not get an apology.
+
+    The live symptom: the agent said hello and apologised for not
+    understanding in the same breath. Line noise at -58 dBFS was opening a
+    turn, the recogniser returned nothing, and the agent treated that as a
+    misunderstanding -- talking over a caller who had not started yet.
+    """
+    session, call, ua, synth, llm = await build_session(
+        ["sollte nie erkannt werden"], ["sollte nie aufgerufen werden"],
+    )
+    runner = asyncio.ensure_future(session.run())
+    await wait_until(lambda: call.rtp is not None, 2, "answer")
+    call.rtp.start_draining(speed=20)
+    await wait_until(lambda: not call.rtp.is_playing(), 3, "greeting done")
+
+    spoken_before = len(synth.spoken)
+    requests_before = len(llm.requests)
+    # Two seconds of line noise, well above the duration threshold so the only
+    # thing that can stop it is the level.
+    rng = np.random.default_rng(5)
+    noise = [(rng.normal(0, 25, 160)).astype(np.int16) for _ in range(100)]
+    await feed(session, noise, drain_first=False)
+    await asyncio.sleep(0.4)
+
+    answers = [t for t in synth.spoken[spoken_before:] if t != session.texts.still_there]
+    assert answers == [], f"replied to line noise: {answers}"
+    assert len(llm.requests) == requests_before, "asked the model about line noise"
+    assert session.agent.misunderstood == 0, (
+        f"noise counted as a misunderstanding ({session.agent.misunderstood})")
+    print("PASS two seconds of line noise produced no turn and no apology")
+
+    session._done.set()
+    call.rtp.stop_draining()
+    await asyncio.wait_for(runner, 3)
+    return True
+
+
 async def test_echo_does_not_interrupt():
     """The agent's own voice echoing back must not cut it off."""
     session, call, ua, synth, llm = await build_session(
@@ -1116,6 +1154,7 @@ async def main() -> int:
         ("short barge-in not apologised at", test_short_bargein_is_not_apologised_at),
         ("tiny fragment ignored", test_tiny_fragment_is_ignored_silently),
         ("broken voice hands over", test_a_broken_voice_does_not_make_a_silent_call),
+        ("line noise says nothing", test_line_noise_after_the_greeting_says_nothing),
         ("echo does not interrupt", test_echo_does_not_interrupt),
         ("transfer method passthrough", test_transfer_method_passed_through),
         ("farewell ends call", test_farewell_ends_the_call),

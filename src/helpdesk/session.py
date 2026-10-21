@@ -151,6 +151,7 @@ class CallSession:
                 max_utterance_ms=int(vad_config.get("max_utterance_ms", 20000)),
                 pre_roll_ms=pre_roll_ms,
                 barge_in_ms=barge_in_ms,
+                min_speech_db=float(vad_config.get("min_speech_db", -50.0)),
             ),
             vad,
         )
@@ -168,6 +169,10 @@ class CallSession:
         # Below this an utterance is not worth a reply of any kind, not even an
         # apology. Tied to the recogniser's own floor so the two cannot disagree.
         self.min_turn_ms = int(config.get("asr", {}).get("min_utterance_ms", 350))
+        self.min_speech_db = float(vad_config.get("min_speech_db", -50.0))
+        #: level of the utterance this turn is about, measured before the
+        #: recogniser's buffer is cleared
+        self._last_utterance_level = None
         self.filler_after_ms = int(dialog.get("filler_after_ms", 700))
         self._last_filler = ""
         self._filler_task: Optional[asyncio.Task] = None
@@ -915,15 +920,34 @@ class CallSession:
             self.metrics.add(metrics)
             return
 
+        pending_audio = self.endpointer.utterance(trim_trailing_silence=True)
+        self._last_utterance_level = (
+            rms_dbfs(pending_audio) if pending_audio.size else -120.0
+        )
         transcript = await self._finish_recognition(metrics)
         self.endpointer.reset()
 
         if transcript is None or transcript.is_empty:
+            audio_level = rms_dbfs(self.endpointer.utterance(trim_trailing_silence=False)) \
+                if self._last_utterance_level is None else self._last_utterance_level
+            if audio_level < self.min_speech_db:
+                # Nothing was said. Apologising for not understanding silence is
+                # how the agent ended up saying "das habe ich nicht verstanden"
+                # immediately after its own greeting, and the apology then talks
+                # over whoever was about to speak.
+                log.info(
+                    "nothing recognised in %d ms at %.1f dBFS -- nobody spoke, "
+                    "so staying quiet rather than apologising",
+                    metrics.utterance_ms, audio_level,
+                )
+                self.metrics.add(metrics)
+                return
             self.agent.misunderstood += 1
             self.metrics.add(metrics)
             log.info(
-                "nothing recognised in %d ms of audio (attempt %d/%d)",
+                "nothing recognised in %d ms of audio at %.1f dBFS (attempt %d/%d)",
                 metrics.utterance_ms,
+                audio_level,
                 self.agent.misunderstood,
                 self.max_misunderstood,
             )

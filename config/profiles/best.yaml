@@ -42,7 +42,10 @@ sip:
 
 asr:
   backend: faster-whisper
-  model: large-v3-turbo            # ~1.6 GB at int8; distil-large-v3 is smaller
+  model: large-v3        # nicht -turbo: turbo ist ein destillierter
+                            # 4-Schicht-Decoder, large-v3 erkennt Deutsch
+                            # genauer. Kostet ~150 ms mehr, die die laufende
+                            # Erkennung groesstenteils verdeckt.
   device: cuda
   # Immer 0, wenn der Container auf eine Karte gepinnt ist: diese Karte ist
   # darin Index 0, egal welche Nummer sie auf dem Host hat. GPU_ID waehlt die
@@ -51,7 +54,8 @@ asr:
   device_index: 0
   compute_type: float16            # nicht int8: float16 erkennt Deutsch sauberer
   language: de                     # pin it; autodetect costs time and can flip
-  beam_size: 1                     # greedy: beam search doubles latency
+  beam_size: 2                   # 1 ist schneller, 2 erkennt Namen und
+                            # Fehlercodes zuverlaessiger
   download_root: /models/whisper
   # Bias the recogniser towards your vocabulary -- product names, error codes.
   # Worth filling in with your own terms: this is the difference between
@@ -139,7 +143,14 @@ tts:
   chatterbox:
     device: cuda
     language_id: de
-    reference_audio: ""            # 7-20 s of clean speech to clone a voice
+    # DER wichtigste Hebel fuer die Stimmqualitaet. Ohne Referenz nimmt
+    # Chatterbox seine eingebaute Stimme, und die ist keine deutsche -- Deutsch
+    # klingt damit nach einem Englischsprecher, der Deutsch liest. Mit 10-20 s
+    # klarer deutscher Aufnahme (eine Person, kein Hall, keine Musik) nach
+    # ./voices/ klingt es wie diese Person:
+    #     cp meine-stimme.wav voices/
+    #     reference_audio: /models/piper/meine-stimme.wav
+    reference_audio: ""
     exaggeration: 0.45             # keep low for a calm service voice
     cfg_weight: 0.5
     temperature: 0.6
@@ -230,6 +241,11 @@ vad:
   # Durchlauf ist dann reine GPU-Last -- und zwar auf derselben GPU, die
   # auch synthetisiert, der Preis landet also bei der Stimme.
   live_min_level_db: -50.0
+  # Nichts darunter ist Sprache, egal was das VAD sagt. Sprache am Telefon
+  # liegt bei -35 bis -15 dBFS; Leitungsrauschen bei -58 hat Zuege eroeffnet
+  # und den Agenten direkt nach der eigenen Begruessung "das habe ich nicht
+  # verstanden" sagen lassen.
+  min_speech_db: -50.0
 
   # Echo guard: stops the agent's own voice, echoed back by a speakerphone or
   # mobile, from being mistaken for the caller interrupting. Compares incoming

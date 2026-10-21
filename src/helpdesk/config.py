@@ -207,6 +207,10 @@ DEFAULTS: Dict[str, Any] = {
         # buffer anyway, so the pass is GPU cost with no result -- and that GPU
         # also synthesises the reply, so the cost lands on the voice.
         "live_min_level_db": -50.0,
+        # Nothing below this is speech, whatever the VAD says. Speech on a
+        # phone line is around -35 to -15 dBFS; noise at -58 was opening turns
+        # and making the agent apologise right after its own greeting.
+        "min_speech_db": -50.0,
         "echo_guard": True,
         "echo_attenuation_db": 12.0,
         "echo_correlation": 0.72,
