@@ -105,14 +105,16 @@ class FasterWhisperRecognizer(Recognizer):
             return self._model
         from faster_whisper import WhisperModel  # noqa: PLC0415
 
+        device_index = self._usable_device_index()
         log.info(
-            "loading ASR model %s (%s, %s)", self.model_size, self.device, self.compute_type
+            "loading ASR model %s (%s:%d, %s)",
+            self.model_size, self.device, device_index, self.compute_type,
         )
         started = time.monotonic()
         self._model = WhisperModel(
             self.model_size,
             device=self.device,
-            device_index=self.device_index,
+            device_index=device_index,
             compute_type=self.compute_type,
             download_root=self.download_root,
             num_workers=self.num_workers,
@@ -120,6 +122,36 @@ class FasterWhisperRecognizer(Recognizer):
         )
         log.info("ASR model ready in %.1fs", time.monotonic() - started)
         return self._model
+
+    def _usable_device_index(self) -> int:
+        """An index the runtime actually has, not the host's GPU number.
+
+        Pinning a container to one card -- device_ids, NVIDIA_VISIBLE_DEVICES --
+        makes that card index 0 inside it, whatever its number on the host. A
+        config carrying the host number then asks for a device that is not
+        there, and CTranslate2 answers "CUDA failed with error invalid device
+        ordinal" and the container restarts forever, reloading the voice model
+        on every attempt. Torch sees the same remapping, which is why a voice
+        on `cuda` loads while the recogniser on `cuda:4` does not. Correcting
+        it loudly beats a crash loop.
+        """
+        if self.device != "cuda" or self.device_index == 0:
+            return self.device_index
+        try:
+            import ctranslate2  # noqa: PLC0415
+
+            available = int(ctranslate2.get_cuda_device_count())
+        except Exception:  # pragma: no cover - depends on the build
+            return self.device_index
+        if available and self.device_index >= available:
+            log.warning(
+                "asr.device_index is %d but this process can see %d CUDA device(s), "
+                "so index 0 is used. Inside a container pinned to one card that "
+                "card is always 0 -- GPU_ID selects it, device_index does not.",
+                self.device_index, available,
+            )
+            return 0
+        return self.device_index
 
     def _transcribe_sync(self, pcm: np.ndarray, language: Optional[str]) -> Transcript:
         model = self._load()

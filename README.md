@@ -783,19 +783,21 @@ Satz gemessen, also ohne Kernel-Kompilierung.
 | Backend | rtf | brauchbar | Anmerkung |
 |---|---|---|---|
 | **piper** | ≪ 0,1 | **ja** | CPU, robotisch, 974 ms Median im Gespräch |
-| chatterbox | **1,41** | nein | GPU ~3 GB, stürzte nach Barge-in ab |
-| qwen3 | **13,58** | nein | GPU ~3,4 GB, keine deutschen Sprecher |
+| **chatterbox** | **0,48** / 1,41 | **hängt von der Karte ab** | 0,48 auf einer freien L4 (69 it/s), 1,41 auf einer mit Ollama und Whisper geteilten (20 it/s) |
+| qwen3 | 13,58 | nein | GPU ~3,4 GB, keine deutschen Sprecher |
 | Voxtral | — | nicht startbar | braucht eine CPU mit AVX |
 
 **Über 1,0 wartet der Anrufer jeden Satz ab**, und daran ändert keine
-Einstellung etwas. Auf dieser Karte, mit drei Modellen darauf, hält kein
-neuronales GPU-TTS mit — das ist eine Eigenschaft der Hardware, nicht dieses
-Projekts. Für eine natürliche Stimme im Produktivbetrieb gehört die Stimme auf
-eine eigene Karte.
+Einstellung etwas.
 
-Bis dahin ist **piper** die Wahl, die funktioniert: ein Helpdesk, der in einer
-Sekunde eine richtige Antwort gibt, ist mehr wert als einer, der nach sieben
-Sekunden schön klingt.
+Der Chatterbox-Wert ist der Grund, diese Zahl überhaupt zu loggen: **dasselbe
+Modell, dieselbe Konfiguration, Faktor 3 Unterschied** — einmal auf einer
+Karte, die sich das Sprachmodell und Whisper teilt, einmal auf einer freieren.
+Rate also nicht, lies `voice speed:` beim Start.
+
+Unter 0,5 ist für einen Anruf gut. Über 1,0 ist **piper** die Wahl, die
+funktioniert: ein Helpdesk, der in einer Sekunde eine richtige Antwort gibt,
+ist mehr wert als einer, der nach sieben Sekunden schön klingt.
 
 ---
 
