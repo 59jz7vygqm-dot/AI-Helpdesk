@@ -272,6 +272,10 @@ class HelpdeskApplication:
             extra_instructions=dialog.get("extra_instructions", ""),
             mode=dialog.get("mode", "helpdesk"),
             log_prompts=bool(self.config["logging"].get("log_prompts", False)),
+            answer_before_handover_turns=int(
+                dialog.get("answer_before_handover_turns", 1)
+            ),
+            insist_min_score=float(dialog.get("insist_min_score", 0.5)),
         )
         session = CallSession(
             call,

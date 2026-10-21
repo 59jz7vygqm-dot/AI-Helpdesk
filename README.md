@@ -774,6 +774,69 @@ Was man am ehesten anfasst:
 
 ---
 
+## Die empfohlene Konfiguration
+
+Eine Datei, keine Wahl. Qualität vor Speicher.
+
+```bash
+cp config/profiles/best.yaml config/config.yaml
+echo "TTS_PROFILE=quality" >> .env
+sudo docker compose up -d --build
+./scripts/preflight.sh
+```
+
+Belegt rund 12–14 GB auf einer Karte: Chatterbox ~3 GB, Whisper
+`large-v3-turbo` in **float16** (nicht int8 — erkennt Deutsch sauberer) ~3 GB,
+dazu das Sprachmodell in Ollama. Jede Sparmaßnahme, die hier fehlt, wurde
+einmal mit Qualität oder Latenz bezahlt.
+
+Was beim Start stimmen muss:
+
+```
+voice backend: chatterbox
+voice speed: rtf 0.48 (1.8s for 3.7s of speech)     ← unter 0,5 ist gut
+knowledge sources: 10-it-faq.md(13), 00-unternehmen.md(4)
+helpdesk ready: extension 1222 on …
+```
+
+Liegt `voice speed:` **über 1,0**, ist die Karte zu voll — Last runter oder
+`tts.backend: piper`. Dasselbe Modell lag auf einer geteilten Karte bei 1,41
+und auf einer freien bei 0,48.
+
+**Das Sprachmodell bleibt bewusst `qwen2.5:7b-instruct-q4_K_M`**: gemessene
+370 ms bis zum ersten Token, und darauf ist die Antwortzeit unter einer Sekunde
+gebaut. Mehr Speicher heißt hier nicht automatisch besser — ein 14B verdoppelt
+die Zeit bis zum ersten Token, und das hört man am Telefon. Erst wenn die
+Antworten *inhaltlich* zu schwach sind, lohnt der Tausch; dann `llm_ttft` im
+Log vergleichen statt raten.
+
+### Er leitet weiter, obwohl er die Antwort hat
+
+Das war der schwerwiegendste Fehler, und es war kein Modellproblem.
+
+Ein echter Anruf: „Mein Drucker funktioniert nicht", Treffer bei **0,73 und
+0,71** — genau die Abschnitte, die die Frage beantworten — und die Antwort war
+„Einen Moment, ich verbinde Sie."
+
+Ein kleines Modell nimmt den sichersten Ausweg, wenn einer auf dem Tisch
+liegt. Nachträglich erkennen hilft nicht: der Marker kommt zuletzt, da ist der
+Satz schon gesprochen. Also wird die Weiterleitung **gar nicht angeboten**,
+solange die Wissensdatenbank die Frage klar beantwortet:
+
+```yaml
+dialog:
+  answer_before_handover_turns: 1    # 0 schaltet es ab
+  insist_min_score: 0.5
+```
+
+Kostet keine zusätzliche Runde und keine Latenz. Weiter weitergeleitet wird
+trotzdem bei: einer Bitte um einen Mitarbeiter (`wants_human` erkennt
+„Mitarbeiter", „Kollege", „mit einem Menschen", „durchstellen", „Zentrale" und
+weitere), zweimal nicht verstanden, ab dem zweiten Zug, ohne Treffer, und bei
+schwachen Treffern.
+
+---
+
 ## Welche Stimme auf welcher Hardware — gemessen
 
 Alle Zahlen auf einer Tesla L4 (23 GB), geteilt mit Ollama und

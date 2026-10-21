@@ -263,3 +263,28 @@ def is_farewell(text: str) -> bool:
     if any(word in cleaned.split() for word in ("aber", "noch", "frage", "wie", "was", "wann", "wo", "warum")):
         return False
     return cleaned in FAREWELL_PHRASES
+
+
+#: a caller asking for a person, however they put it. Matched as substrings
+#: because these arrive inside a sentence ("kann ich mal einen Mitarbeiter
+#: sprechen"), unlike a farewell, which is the whole utterance.
+_HUMAN_REQUESTS = (
+    "mitarbeiter", "kollege", "kollegen", "einen menschen", "echten menschen",
+    "mit jemandem sprechen", "jemand anderen", "jemanden anderen",
+    "weiterverbinden", "durchstellen", "verbinden sie mich",
+    "mit einem menschen", "keine maschine", "kein computer", "keinen bot",
+    "techniker", "sachbearbeiter", "vorgesetzten", "zentrale",
+)
+
+
+def wants_human(text: str) -> bool:
+    """True when the caller asked to be put through to a person.
+
+    Used to leave the hand-over available even where the knowledge base has an
+    answer: someone who asks for a person is not helped by the right answer
+    from the wrong speaker.
+    """
+    cleaned = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    if not cleaned:
+        return False
+    return any(phrase in cleaned for phrase in _HUMAN_REQUESTS)
