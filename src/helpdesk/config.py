@@ -250,6 +250,13 @@ DEFAULTS: Dict[str, Any] = {
         # A goodbye hangs up, so it needs more than a short noisy fragment behind
         # it, and never on the very first turn -- nobody calls to say goodbye.
         "farewell_min_ms": 600,
+        # While the knowledge base clearly answers the question, do not offer
+        # the hand-over for this many turns. A real call handed over on hits of
+        # 0.73 and 0.71 -- the passages that answer it -- because a small model
+        # takes the safest-looking route out when one is available. 0 disables
+        # it; a request for a person and two misunderstandings still hand over.
+        "answer_before_handover_turns": 1,
+        "insist_min_score": 0.5,
         "answer_delay_ms": 0,
         "ring_before_answer": True,
     },

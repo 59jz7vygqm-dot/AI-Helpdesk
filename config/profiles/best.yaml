@@ -1,0 +1,323 @@
+# DAS Profil. Qualitaet vor Speicher, eine Konfiguration, keine Wahl.
+#
+#   cp config/profiles/best.yaml config/config.yaml
+#   echo "TTS_PROFILE=quality" >> .env
+#   sudo docker compose up -d --build
+#
+# Belegt rund 12-14 GB auf einer Karte: Chatterbox ~3 GB, Whisper large-v3-turbo
+# in float16 ~3 GB, dazu das Sprachmodell in Ollama. Das ist Absicht -- jede
+# Sparmassnahme hier wurde einmal mit Qualitaet oder Latenz bezahlt.
+#
+# Gemessen auf einer Tesla L4, die sich die Karte NICHT mit anderer Last teilt:
+#   voice speed: rtf 0.48   (brauchbar; geteilt waren es 1.41, unbrauchbar)
+# Wenn `voice speed:` beim Start ueber 1.0 liegt, ist die Karte zu voll --
+# entweder Last runter oder tts.backend auf piper.
+#
+# Was hier NICHT drin ist und warum:
+#   qwen3   - rtf 13.58 gemessen, und keine deutschen Sprecher
+#   Voxtral - braucht eine CPU mit AVX, startet sonst gar nicht
+sip:
+  username: "900"                  # the extension the PBX knows
+  password: ""                     # set HELPDESK_SIP_PASSWORD instead
+  auth_username: ""                # only if the PBX wants a separate auth id
+  domain: ""                       # defaults to server_host
+  server_host: "192.168.1.10"      # the PBX
+  server_port: 5060
+  display_name: "AI Helpdesk"
+  register_expires: 300
+
+  bind_host: "0.0.0.0"
+  bind_port: 5060
+  advertise_host: ""               # set if the auto-detected local IP is wrong
+  rtp_port_start: 16000
+  rtp_port_end: 16200
+
+  # PCMA (A-law) is the European default; PCMU is US/Canada.  Both are 8 kHz
+  # G.711, so there is nothing to gain from reordering unless the PBX transcodes.
+  codec_preference: ["PCMA", "PCMU"]
+
+  max_concurrent_calls: 1          # one call per GPU slot; see the README
+  trace: false                     # log every SIP message (noisy, but the first
+                                   # thing to turn on when registration fails)
+
+asr:
+  backend: faster-whisper
+  model: large-v3-turbo            # ~1.6 GB at int8; distil-large-v3 is smaller
+  device: cuda
+  # Immer 0, wenn der Container auf eine Karte gepinnt ist: diese Karte ist
+  # darin Index 0, egal welche Nummer sie auf dem Host hat. GPU_ID waehlt die
+  # Karte aus, device_index nicht. Eine Host-Nummer hier bedeutet
+  # "CUDA failed with error invalid device ordinal" und eine Neustartschleife.
+  device_index: 0
+  compute_type: float16            # nicht int8: float16 erkennt Deutsch sauberer
+  language: de                     # pin it; autodetect costs time and can flip
+  beam_size: 1                     # greedy: beam search doubles latency
+  download_root: /models/whisper
+  # Bias the recogniser towards your vocabulary -- product names, error codes.
+  # Worth filling in with your own terms: this is the difference between
+  # "Drucker druckt nicht" and "Drucker trug nicht".
+  initial_prompt: "Drucker, Papierstau, Fehlercode, Toner, VPN, Kennung, Passwort, Rechner, Bildschirm, Netzwerk."
+  min_avg_logprob: -1.1            # below this the transcript is discarded
+  # Strip silence before decoding. The most effective guard against hallucinated
+  # words on short or quiet input, for about 10 ms.
+  vad_filter: true
+  min_utterance_ms: 350            # shorter than this is a click, not a sentence
+  max_no_speech_prob: 0.75
+  cpu_threads: 4
+
+llm:
+  # ollama = local Ollama daemon
+  # openai = any OpenAI-compatible server (vLLM, TGI, llama.cpp, LM Studio);
+  #          then base_url ends in /v1 and model is the name it serves
+  backend: ollama
+  base_url: "http://127.0.0.1:11434"
+  api_key: "none"                  # only used by the openai backend
+  # 7B is the sweet spot for a phone helpdesk: answers are short and grounded in
+  # retrieved text, so a 14B rarely says anything better -- it just answers later.
+  # Spend spare VRAM on the voice instead; that is what callers notice.
+  model: "qwen2.5:7b-instruct-q4_K_M"
+  keep_alive: -1                   # number of seconds; -1 = keep resident forever
+                                   # (a string needs a unit, e.g. "30m")
+  timeout: 60
+  # Reasoning models (qwen3, deepseek-r1) would think silently for seconds
+  # before the first word. Dead air on a phone call -- keep this false.
+  think: false
+  options:
+    temperature: 0.2               # low: a helpdesk should be boring
+    top_p: 0.9
+    num_predict: 110               # a phone answer is short by design
+    num_ctx: 4096
+    stop: ["\nANRUFER", "\nAnrufer:", "\nUser:"]
+
+tts:
+  # piper      - CPU, ~30 ms to first audio, robotic but understandable.
+  #              THE default: in every image, never stalls, no GPU.
+  # chatterbox - GPU (~3 GB), natural and clonable, MIT, 23 languages.
+  #              Needs an image built with TTS_PROFILE=quality.
+  # qwen3      - Qwen3-TTS, GPU. NOT usable for a live call on an L4: measured
+  #              rtf 13.6 on the first sentence and 1-2 warm, so the caller
+  #              waits through every sentence. Its built-in speakers are not
+  #              German either, so German comes out accented. Needs an image
+  #              built with TTS_PROFILE=qwen. Fine for offline rendering.
+  #              Careful: TTS_BACKEND in .env overrides this line.
+  # openai     - any server exposing /v1/audio/speech (Qwen3-TTS, Kokoro, XTTS)
+  backend: chatterbox
+
+  qwen3:
+    # 1.7B sounds clearly better than 0.6B; drop to 0.6B only if VRAM is tight.
+    model_id: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+    device: cuda:0
+    dtype: bfloat16
+    language: German             # the model wants a language name, not a code
+    # custom = a built-in speaker | clone = your own voice | design = describe it
+    mode: custom
+    speaker: ""                  # see scripts/list_qwen_voices.py
+    instruct: ""                 # e.g. "ruhig, freundlich, sachlich"
+    # mode: clone -- 3-20 s of clean speech plus its exact transcript
+    reference_audio: ""
+    reference_text: ""
+    attn_implementation: ""      # "flash_attention_2" if installed
+    sample_rate: 24000
+    streaming: true              # used when the installed build exposes it
+
+  piper:
+    # medium, not high: the call is 8 kHz, so "high" spends several times the
+    # synthesis time on detail that the downsample throws away. Watch the log for
+    # "rtf" above 0.3 -- that means synthesis is the bottleneck.
+    model_path: /models/piper/de_DE-thorsten-medium.onnx
+    config_path: ""                # defaults to model_path + .json
+    length_scale: 1.0              # >1 slower, <1 faster
+    # Synthesis is the biggest share of the response time, so give it cores.
+    threads: 8                     # 0 = let onnxruntime decide (too conservative)
+    noise_scale: 0.667
+    noise_w: 0.8
+    # THE latency lever: on the GPU the realtime factor drops from ~0.3 to under
+    # 0.05, for a few hundred MB of VRAM. Needs an image built with
+    # TTS_PROFILE=quality, which installs onnxruntime-gpu.
+    use_cuda: false
+
+  chatterbox:
+    device: cuda
+    language_id: de
+    reference_audio: ""            # 7-20 s of clean speech to clone a voice
+    exaggeration: 0.45             # keep low for a calm service voice
+    cfg_weight: 0.5
+    temperature: 0.6
+    chunk_tokens: 25               # smaller = earlier first audio, more overhead
+    multilingual: true
+
+  openai:
+    base_url: "http://127.0.0.1:8880/v1"
+    model: tts-1
+    voice: de_female
+    api_key: none
+    response_format: pcm           # must be pcm; anything else adds decode delay
+    sample_rate: 24000
+    speed: 1.0
+
+  cache_dir: /models/phrase-cache   # pre-rendered fixed phrases
+  # Small on purpose: this decides when the caller hears anything at all.
+  first_chunk_min_chars: 14         # start speaking this early into the answer
+  min_chunk_chars: 60
+  max_chunk_chars: 220
+
+knowledge:
+  enabled: true
+  directory: /app/knowledge         # markdown files, split on headings
+  cache_path: /models/kb-index.npz  # rebuilt automatically when the text changes
+  # Each chunk is re-read by the model every turn, so this trades directly
+  # against response time. Two passages answer a helpdesk question.
+  top_k: 2
+  max_chars: 900                    # chunk size
+  overlap_chars: 120
+  context_chars: 1100               # how much knowledge goes into the prompt
+  dense_weight: 0.72                # rest is BM25; lower it if exact terms matter
+  # Below this the agent says it cannot help. Too low and a loosely related
+  # passage gets passed in as context, which invites invented instructions.
+  min_score: 0.40
+  embeddings:
+    backend: fastembed              # CPU: no VRAM, no extra Ollama model to pull
+    # fastembed only serves models it ships as ONNX, not arbitrary HF ids.
+    # German-capable choices:
+    #   jinaai/jina-embeddings-v2-base-de              768 dim, trained on German
+    #   sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2  384 dim, smallest
+    #   intfloat/multilingual-e5-large                 1024 dim, needs the prefixes below
+    model: jinaai/jina-embeddings-v2-base-de
+    batch_size: 16
+    query_prefix: ""                # only e5 models need "query: " / "passage: "
+    document_prefix: ""
+    cache_dir: /models/fastembed
+    threads: 4
+
+vad:
+  backend: auto                     # auto -> webrtc, then silero, then energy
+  # 2, not 3: level 3 discards quiet speech on a phone line, and a fragment
+  # reaching the recogniser is worse than a little extra hangover -- Whisper
+  # invents a plausible phrase out of half a second of audio.
+  aggressiveness: 2                 # webrtcvad 0-3; 3 is strictest
+  # The caller waits this out on every turn, so it is felt directly. Lower feels
+  # snappier but starts cutting off people who pause for breath.
+  end_silence_ms: 320
+  # Must finish before end_silence_ms, otherwise the semantic endpoint below can
+  # never fire. Recognition takes ~70-150 ms for a short utterance, so 140 ms
+  # leaves it enough room against a 320 ms hangover.
+  speculative_silence_ms: 140       # start recognising here, before the hangover
+  start_frames: 3                   # 60 ms of voice to open a turn
+  max_utterance_ms: 20000
+  pre_roll_ms: 300                  # audio kept before the trigger
+  barge_in_ms: 200                  # speech needed to interrupt the agent
+  speculative_asr: true
+
+  # Answer as soon as the running transcript reads as a finished sentence, rather
+  # than waiting out end_silence_ms on every turn. Conservative: needs a final
+  # full stop or question mark and at least semantic_min_words words.
+  semantic_endpointing: true
+  semantic_min_words: 3
+
+  # Transkribieren, waehrend gesprochen wird. Der Nutzen ist nicht die
+  # ASR-Latenz an sich, sondern dass der semantische Endpoint beim ersten
+  # stillen Frame schon eine Hypothese hat -- ohne das kann er erst nach
+  # speculative_silence_ms plus einer ganzen Erkennung feuern, was laenger ist
+  # als end_silence_ms, und verliert gegen den normalen Hangover.
+  # Kosten: jeder Durchlauf ist ein voller Encode auf derselben GPU wie die
+  # Synthese. live_interval_ms ist also auch ein GPU-Last-Regler. Die Logzeile
+  # sagt, ob es sich lohnt: viele "live"-Durchlaeufe ohne "endpoint at ... ms"
+  # sind Kosten ohne Nutzen.
+  live_asr: true
+  live_interval_ms: 500
+  live_min_audio_ms: 600
+  # Leiser als das verwirft die Erkennung den Puffer ohnehin ganz, der
+  # Durchlauf ist dann reine GPU-Last -- und zwar auf derselben GPU, die
+  # auch synthetisiert, der Preis landet also bei der Stimme.
+  live_min_level_db: -50.0
+
+  # Echo guard: stops the agent's own voice, echoed back by a speakerphone or
+  # mobile, from being mistaken for the caller interrupting. Compares incoming
+  # audio against what was just transmitted.
+  echo_guard: true
+  echo_attenuation_db: 12.0         # quieter than this below our own level = echo
+  echo_correlation: 0.72            # envelope correlation that counts as echo
+
+  # When an interruption turns out to be just "mhm" or "alles klar", carry on
+  # with the unheard rest of the answer instead of starting over.
+  resume_on_backchannel: true
+
+dialog:
+  # Without an article, so it reads correctly in every sentence the model builds.
+  # Der echte Firmenname, ohne Artikel, damit jeder Satz des Modells passt.
+  # Steht hier bewusst neutral: ein erfundener Name wird sonst am Telefon
+  # vorgelesen, als wäre er echt.
+  company: "unserem Unternehmen"
+
+  # helpdesk  = answers only from the knowledge base, hands over otherwise
+  # assistant = also chats freely (smalltalk, general questions); for demos
+  mode: helpdesk
+  agent_name: "Alex"
+
+  greeting: >-
+    Guten Tag, hier ist der Service. Was kann ich für Sie tun?
+  transfer_announcement: "Einen Moment bitte, ich verbinde Sie mit einem Kollegen."
+  transfer_failed: >-
+    Ich kann Sie im Moment leider nicht verbinden.
+    Bitte versuchen Sie es später noch einmal. Auf Wiederhören.
+  goodbye: "Vielen Dank für Ihren Anruf. Auf Wiederhören."
+  not_understood: "Entschuldigung, das habe ich nicht verstanden. Können Sie das bitte wiederholen?"
+  still_there: "Sind Sie noch da?"
+  # Spoken only before long answers, so silence does not feel like a dropped
+  # call.  Leave empty to disable -- it costs a little time on every long turn.
+  thinking: ""
+
+  # Played when the answer is not ready within filler_after_ms. Pre-rendered at
+  # startup, so they cost nothing. Several variants on purpose: the same phrase
+  # every turn sounds more mechanical than the pause it replaces.
+  # Empty by default: these were added to cover a multi-second pause, and once
+  # answers arrive in well under a second they interrupt the flow rather than
+  # smoothing it. Fill the list to bring them back.
+  fillers: []
+  filler_after_ms: 900              # 0 disables them
+
+  transfer_number: "200"            # REQUIRED: extension, queue or full number
+
+  # How to hand the call over:
+  #   auto  - try SIP REFER, fall back to the DTMF feature code (recommended)
+  #   refer - REFER only; the clean way when you control the PBX
+  #   dtmf  - feature code only; needed when a managed PBX sets
+  #           allow_transfer=no on the endpoint, which blocks REFER
+  transfer_method: auto
+  # Asterisk's blindxfer sequence from features.conf. Vanilla Asterisk commonly
+  # uses #1, FreePBX commonly ##. There is no safe guess -- ask your provider.
+  transfer_dtmf_feature_code: "##"
+  transfer_dtmf_terminator: ""      # some dialplans want a trailing "#"
+  transfer_dtmf_delay_ms: 700       # pause between feature code and number
+  max_sentences: 2                  # one or two; longer feels like a monologue
+  history_turns: 6
+  extra_instructions: ""            # appended to the system prompt verbatim
+
+  silence_prompt_after_ms: 7000     # ask "are you there?"
+  silence_hangup_after_ms: 20000    # then give up
+  max_call_seconds: 900
+  max_misunderstood: 2              # failed recognitions before handing off
+  farewell_ends_call: true          # "Vielen Dank" ends the call, never transfers
+
+  # Solange die Wissensdatenbank die Frage klar beantwortet, wird die
+  # Weiterleitung fuer so viele Zuege gar nicht erst angeboten. Ein echter
+  # Anruf wurde bei Treffern von 0,73 und 0,71 weitergeleitet -- also genau bei
+  # den Abschnitten, die die Frage beantworten. Wer nach einem Mitarbeiter
+  # fragt, und zweimal nicht verstanden, leiten weiter trotzdem.
+  answer_before_handover_turns: 1
+  insist_min_score: 0.5
+  # Hanging up is irreversible, so a goodbye needs real audio behind it and never
+  # counts on the first turn -- nobody rings up in order to say goodbye.
+  farewell_min_ms: 600
+  answer_delay_ms: 0                # >0 to let it ring first, more human
+  ring_before_answer: true
+
+logging:
+  # Den ganzen Prompt und die Antwort pro Zug mitschreiben. Standardmaessig
+  # aus: mehrere Kilobyte pro Zug, und der Prompt enthaelt die Worte des
+  # Anrufers. Einschalten, um zu klaeren, warum weitergeleitet wurde,
+  # obwohl das Wissen da war.
+  log_prompts: false
+  level: INFO                       # DEBUG prints per-stage timings
+  transcript_dir: /app/transcripts  # one JSON per call; empty disables
+  metrics: true

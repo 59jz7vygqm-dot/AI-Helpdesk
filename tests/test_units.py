@@ -15,12 +15,14 @@ from helpdesk.audio import codec
 from helpdesk.audio.vad import Endpointer, EndpointerConfig, EnergyVad, VadEvent
 from helpdesk.config import apply_env_overrides, DEFAULTS
 from helpdesk.kb.index import split_markdown, tokenize
-from helpdesk.llm.agent import Action, MarkerFilter
+from helpdesk.llm.agent import Action, HelpdeskAgent, MarkerFilter, Turn
 from helpdesk.sip import messages as sipmsg
 from helpdesk.sip import sdp as sdplib
 from helpdesk.sip.auth import DigestAuth, parse_challenge
 from helpdesk.sip.rtp import DtmfCollector, RtpHeader
-from helpdesk.tts.text import SentenceStreamer, split_sentences, spoken_form
+from helpdesk.tts.text import (
+    SentenceStreamer, split_sentences, spoken_form, wants_human,
+)
 
 PASSED = 0
 FAILED = 0
@@ -206,6 +208,43 @@ check("set override still wins",
       apply_env_overrides({"tts": {"backend": "qwen3"}})["tts"]["backend"] == "piper")
 del os.environ["HELPDESK_TTS_BACKEND"]
 
+print("handover guard")
+check("asks for a human: Mitarbeiter", wants_human("Kann ich einen Mitarbeiter sprechen?"))
+check("asks for a human: Mensch", wants_human("Ich will mit einem Menschen reden"))
+check("a printer fault is not a request for a human",
+      not wants_human("Mein Drucker funktioniert nicht."))
+
+
+def _agent(**kw):
+    a = HelpdeskAgent.__new__(HelpdeskAgent)
+    a.mode = kw.get("mode", "helpdesk")
+    a.history = kw.get("history", [])
+    a.misunderstood = kw.get("misunderstood", 0)
+    a.last_top_score = kw.get("score", 0.73)
+    a.answer_before_handover_turns = kw.get("turns", 1)
+    a.insist_min_score = kw.get("min_score", 0.5)
+    return a
+
+
+CONTEXT = "Der Drucker druckt nicht: zuerst das Display pruefen."
+# The live failure: good hits on turn one, and it handed over anyway.
+check("insists when the knowledge answers it on turn one",
+      _agent()._should_insist("Mein Drucker funktioniert nicht.", CONTEXT))
+check("does not insist without knowledge",
+      not _agent()._should_insist("Mein Drucker funktioniert nicht.", ""))
+check("does not insist on a weak hit",
+      not _agent(score=0.31)._should_insist("Mein Drucker funktioniert nicht.", CONTEXT))
+check("lets a caller who asks for a person through",
+      not _agent()._should_insist("Ich will einen Mitarbeiter sprechen", CONTEXT))
+check("lets a misunderstood turn hand over",
+      not _agent(misunderstood=2)._should_insist("Mein Drucker funktioniert nicht.", CONTEXT))
+check("stops insisting after the configured turns",
+      not _agent(history=[Turn(role="user", content="erste Frage")])
+      ._should_insist("Mein Drucker funktioniert nicht.", CONTEXT))
+check("assistant mode never insists",
+      not _agent(mode="assistant")._should_insist("Mein Drucker funktioniert nicht.", CONTEXT))
+
 print()
 print(f"{PASSED} checks passed, {FAILED} failed")
 sys.exit(1 if FAILED else 0)
+

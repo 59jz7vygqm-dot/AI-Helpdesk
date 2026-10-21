@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Dict, List, Optional, Sequence, Tuple
 
+from ..tts.text import wants_human
+
 log = logging.getLogger(__name__)
 
 TRANSFER_MARKER = "[WEITERLEITEN]"
@@ -204,6 +206,8 @@ class HelpdeskAgent:
         extra_instructions: str = "",
         mode: str = "helpdesk",
         log_prompts: bool = False,
+        answer_before_handover_turns: int = 1,
+        insist_min_score: float = 0.5,
     ) -> None:
         self.client = client
         self.kb = knowledge_base
@@ -219,6 +223,18 @@ class HelpdeskAgent:
         #: log the full prompt and reply. Off by default: it is several
         #: kilobytes per turn and the prompt carries the caller's words.
         self.log_prompts = bool(log_prompts)
+        #: best retrieval score of the last lookup, 0.0 when nothing was found
+        self.last_top_score = 0.0
+        #: While the knowledge base clearly answers the question, do not offer
+        #: the hand-over at all for the first N turns. A real call handed over
+        #: on hits of 0.73 and 0.71 -- the passages that answer it -- because a
+        #: small model takes the safest-looking route out when one is on the
+        #: table. Detecting that afterwards is no use: the marker arrives last,
+        #: by which time "Einen Moment, ich verbinde Sie" has already been
+        #: spoken. So it is prevented instead of corrected, which also costs no
+        #: extra round and no latency.
+        self.answer_before_handover_turns = int(answer_before_handover_turns)
+        self.insist_min_score = float(insist_min_score)
         self.system_prompt_template = (
             system_prompt or SYSTEM_PROMPTS.get(self.mode, DEFAULT_SYSTEM_PROMPT)
         )
@@ -248,7 +264,9 @@ class HelpdeskAgent:
             prompt = f"{prompt}\n{self.extra_instructions.strip()}\n"
         return prompt
 
-    def _messages(self, user_text: str, context: str) -> List[Dict[str, str]]:
+    def _messages(
+        self, user_text: str, context: str, *, insist: bool = False
+    ) -> List[Dict[str, str]]:
         messages = [{"role": "system", "content": self.system_prompt()}]
         for turn in self.history[-self.history_turns :]:
             messages.append({"role": turn.role, "content": turn.content})
@@ -266,9 +284,35 @@ class HelpdeskAgent:
                 "und stelle keine Frage, die du schon gestellt hast. Beantworte, "
                 "was er wissen will, oder sage, dass du nicht weiterhelfen kannst."
             )
+        if insist:
+            parts.append(
+                "HINWEIS: Das WISSEN oben beantwortet diese Frage. Antworte daraus "
+                "mit dem naechsten Schritt oder einer Rueckfrage. Leite NICHT weiter."
+            )
         parts.append(f"ANRUFER SAGT:\n{user_text}")
         messages.append({"role": "user", "content": "\n\n".join(parts)})
         return messages
+
+    def _turn_number(self) -> int:
+        """1 for the caller's first utterance."""
+        return sum(1 for t in self.history if t.role == "user") + 1
+
+    def _should_insist(self, user_text: str, context: str) -> bool:
+        if self.mode != "helpdesk" or not context.strip():
+            return False
+        if self._turn_number() > self.answer_before_handover_turns:
+            return False
+        if self.last_top_score < self.insist_min_score:
+            return False
+        if self.misunderstood:
+            # Twice not understood is its own reason to hand over, and that one
+            # has nothing to do with whether the knowledge base has an answer.
+            return False
+        if wants_human(user_text):
+            # Someone who asks for a person is not helped by the right answer
+            # from the wrong speaker.
+            return False
+        return True
 
     async def retrieve(self, query: str) -> Tuple[str, List[str]]:
         if self.kb is None:
@@ -279,9 +323,11 @@ class HelpdeskAgent:
             log.exception("knowledge lookup failed")
             return "", []
         if not hits:
+            self.last_top_score = 0.0
             return "", []
         context = self.kb.format_context(hits, max_chars=self.context_chars)
         sources = [h.chunk.citation for h in hits]
+        self.last_top_score = max(h.score for h in hits)
         log.info(
             "kb hits for %r: %s",
             query[:60],
@@ -298,7 +344,14 @@ class HelpdeskAgent:
         if context is None:
             context, retrieved = await self.retrieve(user_text)
 
-        messages = self._messages(user_text, context)
+        insist = self._should_insist(user_text, context)
+        if insist:
+            log.info(
+                "knowledge answers this (score %.2f) and it is turn %d -- "
+                "asking for an answer, not a hand-over",
+                self.last_top_score, self._turn_number(),
+            )
+        messages = self._messages(user_text, context, insist=insist)
         marker_filter = MarkerFilter()
         spoken: List[str] = []
         first_token_ms = 0
