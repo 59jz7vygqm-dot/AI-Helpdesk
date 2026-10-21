@@ -129,6 +129,13 @@ class EndpointerConfig:
     pre_roll_ms: int = 300
     #: while the bot talks, require this much speech before treating it as barge-in
     barge_in_ms: int = 260
+    #: An absolute floor, below which nothing counts as speech whatever the VAD
+    #: says. Speech on a telephone line sits around -35 to -15 dBFS; line noise
+    #: at -58 was opening turns, reaching the recogniser, coming back empty and
+    #: making the agent apologise straight after its own greeting. An adaptive
+    #: noise floor cannot catch that on its own: it adapts to the noise and then
+    #: a slightly louder patch of the same noise clears the margin.
+    min_speech_db: float = -50.0
 
 
 @dataclass
@@ -180,6 +187,9 @@ class Endpointer:
     def push(self, frame: np.ndarray) -> VadEvent:
         cfg = self.config
         voiced = bool(self.vad.is_speech(frame, cfg.sample_rate))
+        if voiced and rms_dbfs(frame) < cfg.min_speech_db:
+            # Too quiet to be a person, whatever the VAD made of the spectrum.
+            voiced = False
 
         if not self.in_speech:
             max_pre = self._ms_to_frames(cfg.pre_roll_ms)

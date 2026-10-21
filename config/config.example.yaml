@@ -216,6 +216,11 @@ vad:
   # Durchlauf ist dann reine GPU-Last -- und zwar auf derselben GPU, die
   # auch synthetisiert, der Preis landet also bei der Stimme.
   live_min_level_db: -50.0
+  # Nichts darunter ist Sprache, egal was das VAD sagt. Sprache am Telefon
+  # liegt bei -35 bis -15 dBFS; Leitungsrauschen bei -58 hat Zuege eroeffnet
+  # und den Agenten direkt nach der eigenen Begruessung "das habe ich nicht
+  # verstanden" sagen lassen.
+  min_speech_db: -50.0
 
   # Echo guard: stops the agent's own voice, echoed back by a speakerphone or
   # mobile, from being mistaken for the caller interrupting. Compares incoming
