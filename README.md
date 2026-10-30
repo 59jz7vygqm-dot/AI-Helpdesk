@@ -1280,24 +1280,10 @@ asterisk/       optionaler lokaler Asterisk (Templates + Entrypoint)
 scripts/        Preflight, Modelldownload, Pipeline-Test, Tests, Healthcheck
 tts-server/     Qwen3-TTS als eigener Dienst (Python 3.13, OpenAI-kompatibel)
 tests/          simulierte PBX, Session-, Verdrahtungs-, Unit- und TTS-Tests
-openterminal-proxy/
-                eigener Dienst, unabhängig vom Telefonagenten: pro Open-WebUI-
-                Nutzer eine eigene Open-Terminal-Instanz, ohne Netzzugang
 ```
 
-### openterminal-proxy — eine Sandbox pro Nutzer für Open WebUI
+### Nicht hier: openterminal-proxy
 
-Gehört nicht zum Telefonagenten und braucht nichts davon. Open WebUI kennt pro
-Verbindung einen Terminal-Server; dieser Proxy stellt sich an die Stelle und
-gibt jedem Nutzer einen eigenen Container — bei Bedarf gestartet, nach Leerlauf
-entfernt, **ohne Route ins Internet**, mit eigenem Netz pro Nutzer, eigenem
-Schlüssel pro Container und harten Grenzen für RAM, CPU und Prozesse.
-
-```bash
-cp openterminal-proxy/.env.example .env     # OTPROXY_API_KEY setzen
-docker compose -f docker-compose.openterminal.yml up -d --build
-sudo openterminal-proxy/scripts/sandbox-host-firewall.sh install 10.88.0.0/16
-```
-
-Alles weitere — Einbindung in Open WebUI, Bedrohungsmodell, Grenzen,
-Einstellungen — steht in [openterminal-proxy/README.md](openterminal-proxy/README.md).
+Pro Open-WebUI-Nutzer eine eigene Open-Terminal-Instanz, ohne Netzzugang — hat
+mit dem Telefonagenten nichts zu tun und liegt deshalb in einem eigenen Repo:
+[59jz7vygqm-dot/openterminalProxy](https://github.com/59jz7vygqm-dot/openterminalProxy).
